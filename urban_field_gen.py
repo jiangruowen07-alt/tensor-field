@@ -29,6 +29,10 @@ class UrbanFieldGenerator:
         # State
         self.state = {}
         self.controls = {}
+        self.custom_seed_points = []  # 手绘母线控制点 [(x,y), ...]
+        self.draw_mode = False
+        self.drag_index = None  # 正在拖动的控制点索引
+        self._canvas_custom_bound = False
 
         self._build_ui()
         self._bind_events()
@@ -67,7 +71,7 @@ class UrbanFieldGenerator:
         self._label_group(panel, "Site Height")
         self.controls["siteHeight"] = tk.Entry(panel, bg="#1a1a1a", fg="#e0e0e0",
                                                insertbackground="#e0e0e0", relief=tk.SOLID, bd=1)
-        self.controls["siteHeight"].insert(0, "800")
+        self.controls["siteHeight"].insert(0, "200")
         self.controls["siteHeight"].pack(fill=tk.X, pady=(0, 16))
 
         # FIELD LOGIC
@@ -80,7 +84,7 @@ class UrbanFieldGenerator:
         self.controls["fieldType"].pack(fill=tk.X, pady=(0, 16))
 
         self._label_group(panel, "Seed Line Type")
-        self.controls["seedType"] = ttk.Combobox(panel, values=["Straight Line", "Sine Wave", "Arc / Curve"],
+        self.controls["seedType"] = ttk.Combobox(panel, values=["Straight Line", "Sine Wave", "Arc / Curve", "Custom (Hand-drawn)"],
                                                  state="readonly", width=28)
         self.controls["seedType"].set("Straight Line")
         self.controls["seedType"].pack(fill=tk.X, pady=(0, 16))
@@ -90,7 +94,51 @@ class UrbanFieldGenerator:
                                                   bg="#141414", fg="#e0e0e0", troughcolor="#2a2a2a",
                                                   highlightthickness=0, showvalue=False)
         self.controls["seedRotation"].set(0)
-        self.controls["seedRotation"].pack(fill=tk.X, pady=(0, 24))
+        self.controls["seedRotation"].pack(fill=tk.X, pady=(0, 16))
+
+        # 母线位置与形状
+        self._section_title(panel, "SEED LINE (母线)")
+        self._label_group(panel, "Seed X Offset", "0", right_key="seedXVal")
+        self.controls["seedXOffset"] = tk.Scale(panel, from_=-500, to=500, orient=tk.HORIZONTAL,
+                                                bg="#141414", fg="#e0e0e0", troughcolor="#2a2a2a",
+                                                highlightthickness=0, showvalue=False)
+        self.controls["seedXOffset"].set(0)
+        self.controls["seedXOffset"].pack(fill=tk.X, pady=(0, 4))
+        self._label_group(panel, "Seed Y Offset", "0", right_key="seedYVal")
+        self.controls["seedYOffset"] = tk.Scale(panel, from_=-200, to=200, orient=tk.HORIZONTAL,
+                                                bg="#141414", fg="#e0e0e0", troughcolor="#2a2a2a",
+                                                highlightthickness=0, showvalue=False)
+        self.controls["seedYOffset"].set(0)
+        self.controls["seedYOffset"].pack(fill=tk.X, pady=(0, 16))
+
+        self._label_group(panel, "Seed Length", "0.8", right_key="seedLenVal")
+        self.controls["seedLength"] = tk.Scale(panel, from_=0.2, to=1.0, resolution=0.05, orient=tk.HORIZONTAL,
+                                               bg="#141414", fg="#e0e0e0", troughcolor="#2a2a2a",
+                                               highlightthickness=0, showvalue=False)
+        self.controls["seedLength"].set(0.8)
+        self.controls["seedLength"].pack(fill=tk.X, pady=(0, 4))
+        self._label_group(panel, "Sine Amplitude")
+        self.controls["seedSineAmp"] = tk.Entry(panel, bg="#1a1a1a", fg="#e0e0e0",
+                                                insertbackground="#e0e0e0", relief=tk.SOLID, bd=1)
+        self.controls["seedSineAmp"].insert(0, "50")
+        self.controls["seedSineAmp"].pack(fill=tk.X, pady=(0, 4))
+        self._label_group(panel, "Arc Curvature")
+        self.controls["seedArcCurv"] = tk.Entry(panel, bg="#1a1a1a", fg="#e0e0e0",
+                                                insertbackground="#e0e0e0", relief=tk.SOLID, bd=1)
+        self.controls["seedArcCurv"].insert(0, "200")
+        self.controls["seedArcCurv"].pack(fill=tk.X, pady=(0, 8))
+
+        # 手绘母线
+        draw_btn_frame = tk.Frame(panel, bg="#141414")
+        draw_btn_frame.pack(fill=tk.X, pady=(0, 24))
+        self.controls["btnDraw"] = tk.Button(draw_btn_frame, text="Draw Seed Line", command=self._toggle_draw_mode,
+                                             bg="#2a2a2a", fg="#e0e0e0", relief=tk.SOLID, bd=1,
+                                             font=("JetBrains Mono", 10))
+        self.controls["btnDraw"].pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+        self.controls["btnClear"] = tk.Button(draw_btn_frame, text="Clear", command=self._clear_custom_seed,
+                                              bg="#1a1a1a", fg="#e0e0e0", relief=tk.SOLID, bd=1,
+                                              font=("JetBrains Mono", 10))
+        self.controls["btnClear"].pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 0))
 
         # EXPANSION PARAMETERS
         self._section_title(panel, "EXPANSION PARAMETERS")
@@ -236,6 +284,8 @@ class UrbanFieldGenerator:
             return "sine"
         if "Arc" in val:
             return "arc"
+        if "Custom" in val or "Hand" in val:
+            return "custom"
         return "straight"
 
     def _get_spacing_mode(self):
@@ -258,13 +308,156 @@ class UrbanFieldGenerator:
         except (ValueError, TypeError):
             return default
 
+    def _toggle_draw_mode(self):
+        self.draw_mode = not self.draw_mode
+        if self.draw_mode:
+            self.controls["seedType"].set("Custom (Hand-drawn)")
+            self.controls["btnDraw"].config(text="Done Drawing", bg="#3a5a3a")
+            self.status_label.config(text="DRAW MODE: Click to add points, drag to move")
+        else:
+            self._exit_draw_mode()
+        self.update_state()
+
+    def _exit_draw_mode(self):
+        self.draw_mode = False
+        self.controls["btnDraw"].config(text="Draw Seed Line", bg="#2a2a2a")
+        self.status_label.config(text="COORD_SYSTEM: CARTESIAN\nEXPANSION_VECTOR: LINE_LOCAL_NORMAL\nSTATUS: REALTIME_CALCULATION")
+
+    def _find_point_at(self, x, y, radius=10):
+        """返回距离 (x,y) 最近的控制点索引，若超出 radius 则返回 -1"""
+        best_i, best_d = -1, radius * radius
+        for i, (px, py) in enumerate(self.custom_seed_points):
+            d = (x - px) ** 2 + (y - py) ** 2
+            if d < best_d:
+                best_d, best_i = d, i
+        return best_i
+
+    def _on_canvas_click(self, event):
+        if self.state.get("seedType") != "custom":
+            return
+        idx = self._find_point_at(event.x, event.y)
+        if idx >= 0:
+            self.drag_index = idx
+        elif self.draw_mode:
+            self.custom_seed_points.append((event.x, event.y))
+            self.update_state()
+
+    def _on_canvas_drag(self, event):
+        if self.drag_index is not None and 0 <= self.drag_index < len(self.custom_seed_points):
+            self.custom_seed_points[self.drag_index] = (event.x, event.y)
+            self.update_state()
+
+    def _on_canvas_release(self, event):
+        self.drag_index = None
+
+    def _clear_custom_seed(self):
+        self.custom_seed_points.clear()
+        if self.draw_mode:
+            self._toggle_draw_mode()
+        self.update_state()
+
+    def _catmull_rom_point(self, p0, p1, p2, p3, t):
+        """Catmull-Rom 样条：t∈[0,1] 为 p1 到 p2 之间的插值"""
+        t2, t3 = t * t, t * t * t
+        x = 0.5 * (2 * p1[0] + (-p0[0] + p2[0]) * t +
+                   (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2 +
+                   (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * t3)
+        y = 0.5 * (2 * p1[1] + (-p0[1] + p2[1]) * t +
+                   (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2 +
+                   (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3)
+        return (x, y)
+
+    def _sample_curve(self, points, num_samples=80):
+        """将控制点通过 Catmull-Rom 样条采样为平滑曲线点"""
+        if not points:
+            return []
+        if len(points) == 1:
+            return [points[0]]
+        if len(points) == 2:
+            return [(lerp(points[0][0], points[1][0], i / max(num_samples - 1, 1)),
+                     lerp(points[0][1], points[1][1], i / max(num_samples - 1, 1))) for i in range(num_samples)]
+        # 虚拟端点使首尾段自然延伸
+        p0 = (2 * points[0][0] - points[1][0], 2 * points[0][1] - points[1][1])
+        pn = (2 * points[-1][0] - points[-2][0], 2 * points[-1][1] - points[-2][1])
+        extended = [p0] + list(points) + [pn]
+        sampled = []
+        n_per_seg = max(1, num_samples // (len(points) - 1))
+        for i in range(len(points) - 1):
+            for j in range(n_per_seg):
+                t = j / n_per_seg
+                pt = self._catmull_rom_point(extended[i], extended[i + 1], extended[i + 2], extended[i + 3], t)
+                sampled.append(pt)
+        sampled.append(points[-1])
+        return sampled
+
+    def _interpolate_curve(self, points, t):
+        """t from 0 to 1, 沿 Catmull-Rom 曲线弧长均匀插值"""
+        if not points:
+            return None
+        if len(points) == 1:
+            return {"x": points[0][0], "y": points[0][1]}
+        sampled = self._sample_curve(points)
+        if len(sampled) < 2:
+            return {"x": points[0][0], "y": points[0][1]}
+        lengths, total = [], 0
+        for i in range(len(sampled) - 1):
+            dx = sampled[i + 1][0] - sampled[i][0]
+            dy = sampled[i + 1][1] - sampled[i][1]
+            seg_len = math.sqrt(dx * dx + dy * dy)
+            lengths.append(seg_len)
+            total += seg_len
+        if total < 1e-10:
+            return {"x": sampled[0][0], "y": sampled[0][1]}
+        target = t * total
+        acc = 0
+        for i, seg_len in enumerate(lengths):
+            if acc + seg_len >= target:
+                local_t = (target - acc) / seg_len if seg_len > 0 else 0
+                x = lerp(sampled[i][0], sampled[i + 1][0], local_t)
+                y = lerp(sampled[i][1], sampled[i + 1][1], local_t)
+                return {"x": x, "y": y}
+            acc += seg_len
+        return {"x": sampled[-1][0], "y": sampled[-1][1]}
+
+    def _interpolate_polyline(self, points, t):
+        """t from 0 to 1, 沿折线均匀插值（保留用于兼容）"""
+        if not points:
+            return None
+        if len(points) == 1:
+            return {"x": points[0][0], "y": points[0][1]}
+        lengths = []
+        total = 0
+        for i in range(len(points) - 1):
+            dx = points[i + 1][0] - points[i][0]
+            dy = points[i + 1][1] - points[i][1]
+            seg_len = math.sqrt(dx * dx + dy * dy)
+            lengths.append(seg_len)
+            total += seg_len
+        if total < 1e-10:
+            return {"x": points[0][0], "y": points[0][1]}
+        target = t * total
+        acc = 0
+        for i, seg_len in enumerate(lengths):
+            if acc + seg_len >= target:
+                local_t = (target - acc) / seg_len if seg_len > 0 else 0
+                x = lerp(points[i][0], points[i + 1][0], local_t)
+                y = lerp(points[i][1], points[i + 1][1], local_t)
+                return {"x": x, "y": y}
+            acc += seg_len
+        return {"x": points[-1][0], "y": points[-1][1]}
+
     def update_state(self):
         self.state["runMode"] = self._get_run_mode()
         self.state["fieldType"] = self._get_field_type()
         self.state["siteWidth"] = self._safe_float(self.controls["siteWidth"].get(), 1200)
-        self.state["siteHeight"] = self._safe_float(self.controls["siteHeight"].get(), 800)
+        self.state["siteHeight"] = self._safe_float(self.controls["siteHeight"].get(), 200)
         self.state["seedType"] = self._get_seed_type()
         self.state["seedRotation"] = self._safe_float(self.controls["seedRotation"].get(), 0)
+        self.state["seedXOffset"] = self._safe_float(self.controls["seedXOffset"].get(), 0)
+        self.state["seedYOffset"] = self._safe_float(self.controls["seedYOffset"].get(), 0)
+        self.state["seedLength"] = self._safe_float(self.controls["seedLength"].get(), 0.8)
+        self.state["seedSineAmp"] = self._safe_float(self.controls["seedSineAmp"].get(), 50)
+        self.state["seedArcCurv"] = self._safe_float(self.controls["seedArcCurv"].get(), 200)
         self.state["lineSpacing"] = self._safe_float(self.controls["lineSpacing"].get(), 40)
         self.state["posCount"] = self._safe_int(self.controls["posCount"].get(), 10)
         self.state["negCount"] = self._safe_int(self.controls["negCount"].get(), 10)
@@ -280,12 +473,30 @@ class UrbanFieldGenerator:
 
         # 更新显示数值
         self.controls["rotVal"].config(text=f"{self.state['seedRotation']}°")
+        self.controls["seedXVal"].config(text=str(int(self.state["seedXOffset"])))
+        self.controls["seedYVal"].config(text=str(int(self.state["seedYOffset"])))
+        self.controls["seedLenVal"].config(text=f"{self.state['seedLength']:.2f}")
         self.controls["spacingVal"].config(text=str(self.state["lineSpacing"]))
         self.controls["scaleVal"].config(text=f"{self.state['spacingScale']:.1f}")
         self.controls["noiseScaleVal"].config(text=str(self.state["noiseScale"]))
         self.controls["noiseStrVal"].config(text=str(int(self.state["noiseStrength"])))
         self.controls["crossVal"].config(text=str(int(self.state["crossSpacing"])))
 
+        if self.draw_mode and self.state["seedType"] != "custom":
+            self._exit_draw_mode()
+        # 母线手绘模式：绑定/解绑画布交互
+        if self.state["seedType"] == "custom":
+            if not self._canvas_custom_bound:
+                self.canvas.bind("<Button-1>", self._on_canvas_click)
+                self.canvas.bind("<B1-Motion>", self._on_canvas_drag)
+                self.canvas.bind("<ButtonRelease-1>", self._on_canvas_release)
+                self._canvas_custom_bound = True
+        else:
+            if self._canvas_custom_bound:
+                self.canvas.unbind("<Button-1>")
+                self.canvas.unbind("<B1-Motion>")
+                self.canvas.unbind("<ButtonRelease-1>")
+                self._canvas_custom_bound = False
         self.resize_canvas()
         self.generate()
 
@@ -296,21 +507,41 @@ class UrbanFieldGenerator:
         self.canvas.config(width=w, height=h)
 
     def get_seed_point(self, t):
-        """t from 0 to 1"""
-        x = (t - 0.5) * self.state["siteWidth"] * 0.8
+        """t from 0 to 1，母线局部坐标先算形状，再旋转，最后平移到中心+偏移"""
+        s = self.state
+
+        if s["seedType"] == "custom" and len(self.custom_seed_points) >= 2:
+            pt = self._interpolate_curve(self.custom_seed_points, t)
+            return pt if pt else self._fallback_seed_point(t)
+
+        length_ratio = s["seedLength"]
+        half_span = s["siteWidth"] * length_ratio * 0.5
+        x = (t - 0.5) * 2 * half_span
         y = 0.0
 
-        if self.state["seedType"] == "sine":
-            y = math.sin(t * math.pi * 2) * 50
-        elif self.state["seedType"] == "arc":
-            y = ((t - 0.5) ** 2) * 200
+        if s["seedType"] == "sine":
+            y = math.sin(t * math.pi * 2) * s["seedSineAmp"]
+        elif s["seedType"] == "arc":
+            y = ((t - 0.5) ** 2) * s["seedArcCurv"]
 
         # 旋转
-        rad = self.state["seedRotation"] * math.pi / 180
+        rad = s["seedRotation"] * math.pi / 180
         rx = x * math.cos(rad) - y * math.sin(rad)
         ry = x * math.sin(rad) + y * math.cos(rad)
 
-        return {"x": rx + self.state["siteWidth"] / 2, "y": ry + self.state["siteHeight"] / 2}
+        # 平移到场地中心 + 用户偏移
+        cx = s["siteWidth"] / 2 + s["seedXOffset"]
+        cy = s["siteHeight"] / 2 + s["seedYOffset"]
+        return {"x": rx + cx, "y": ry + cy}
+
+    def _fallback_seed_point(self, t):
+        """custom 无点时回退到直线"""
+        s = self.state
+        cx = s["siteWidth"] / 2 + s["seedXOffset"]
+        cy = s["siteHeight"] / 2 + s["seedYOffset"]
+        half = s["siteWidth"] * 0.4
+        x = (t - 0.5) * 2 * half + cx
+        return {"x": x, "y": cy}
 
     def get_line_vectors(self, t):
         """获取线上点的切向和法向"""
@@ -403,6 +634,9 @@ class UrbanFieldGenerator:
 
     def draw_result(self, lines):
         s = self.state
+        # 绘制场地边界（1:6 横向矩形）
+        self.canvas.create_rectangle(0, 0, s["siteWidth"], s["siteHeight"],
+                                     outline="#555555", width=2, dash=(4, 4))
         if s["runMode"] == "A":
             # FLOW LINES
             for idx, line in enumerate(lines):
@@ -457,12 +691,23 @@ class UrbanFieldGenerator:
                                 p1["x"], p1["y"], p2["x"], p2["y"], p3["x"], p3["y"], p4["x"], p4["y"],
                                 fill=fill_color, outline="#1a1a1a")  # rgba(255,255,255,0.1) 近似
 
+        # 手绘母线：绘制 Catmull-Rom 曲线与控制点
+        if s["seedType"] == "custom" and self.custom_seed_points:
+            curve_pts = self._sample_curve(self.custom_seed_points)
+            for i in range(len(curve_pts) - 1):
+                x1, y1 = curve_pts[i]
+                x2, y2 = curve_pts[i + 1]
+                self.canvas.create_line(x1, y1, x2, y2, fill="#ff6600", width=2)
+            for x, y in self.custom_seed_points:
+                self.canvas.create_oval(x - 5, y - 5, x + 5, y + 5, fill="#ff3300", outline="#ffffff")
+
     def _bind_events(self):
         def on_change(*args):
             self.update_state()
 
         for key, ctrl in self.controls.items():
-            if key in ("rotVal", "spacingVal", "scaleVal", "noiseScaleVal", "noiseStrVal", "crossVal"):
+            if key in ("rotVal", "spacingVal", "scaleVal", "noiseScaleVal", "noiseStrVal", "crossVal",
+                       "seedXVal", "seedYVal", "seedLenVal"):
                 continue
             if isinstance(ctrl, tk.Scale):
                 ctrl.config(command=lambda v, k=key: self.update_state())
@@ -489,6 +734,13 @@ class UrbanFieldGenerator:
 
     def _reset(self):
         self.controls["seedRotation"].set(0)
+        self.controls["seedXOffset"].set(0)
+        self.controls["seedYOffset"].set(0)
+        self.controls["seedLength"].set(0.8)
+        self.controls["seedSineAmp"].delete(0, tk.END)
+        self.controls["seedSineAmp"].insert(0, "50")
+        self.controls["seedArcCurv"].delete(0, tk.END)
+        self.controls["seedArcCurv"].insert(0, "200")
         self.controls["lineSpacing"].set(40)
         self.controls["posCount"].delete(0, tk.END)
         self.controls["posCount"].insert(0, "10")
