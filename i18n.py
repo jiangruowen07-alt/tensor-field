@@ -22,7 +22,12 @@ def set_language(lang):
     global OFFSET_HINT, MULTI_SEED_HINT, CURVE_PARAMS_HINT, CURVE_SELECT_HINT
     global LINE_SPACING_SHORT, POS_NEG, OFFSET_XY, SPACING_MODE_SHORT, SPACING_SCALE_SHORT, CROSS_SPACING_SHORT
     global NOISE_ENABLED, ROADS_PERP, ROAD_HIERARCHY, ADAPTIVE_CROSS
-    global BASIS_BLEND_FACTOR
+    global BASIS_BLEND_FACTOR, RIVER_BOUNDARY_TITLE, USE_RIVER_BOUNDARY, BOUNDARY_DECAY, BOUNDARY_BLEND
+    global TENSOR_CENTER_TITLE, TENSOR_CENTER_X, TENSOR_CENTER_Y, BTN_DRAW_RIVER
+    global BTN_ADD_CENTER, BTN_CLEAR_CENTERS, TENSOR_CENTER_HINT
+    global HEIGHT_FIELD_TITLE, USE_HEIGHT_FIELD, BTN_LOAD_HEIGHT, BTN_CLEAR_HEIGHT, HEIGHT_BLEND
+    global HYPERSTREAMLINE_TITLE, HYPERSTREAMLINE_MAJOR, HYPERSTREAMLINE_MINOR, HYPERSTREAMLINE_BOTH
+    global BTN_ADD_SEED, BTN_CLEAR_SEEDS, HYPER_STEP_SIZE, HYPER_MAX_LENGTH, HYPER_ANGLE_STOP
     global CURVATURE_WEIGHT, ATTRACTOR_WEIGHT, VALUE_WEIGHT
     global PARCEL_FRONTAGE_BASED, PARCEL_BLOCK_BY_BLOCK, PARCEL_CORNER_SEPARATE
     global PARCEL_PERTURBATION, PARCEL_PERTURBATION_STR
@@ -90,6 +95,31 @@ def set_language(lang):
     globals()["NO_CURVES_YET"] = d["NO_CURVES_YET"]
     globals()["DRAW_MODE_STATUS"] = d["DRAW_MODE_STATUS"]
     globals()["BASIS_BLEND_FACTOR"] = d["BASIS_BLEND_FACTOR"]
+    globals()["RIVER_BOUNDARY_TITLE"] = d["RIVER_BOUNDARY_TITLE"]
+    globals()["USE_RIVER_BOUNDARY"] = d["USE_RIVER_BOUNDARY"]
+    globals()["BOUNDARY_DECAY"] = d["BOUNDARY_DECAY"]
+    globals()["BOUNDARY_BLEND"] = d["BOUNDARY_BLEND"]
+    globals()["TENSOR_CENTER_TITLE"] = d["TENSOR_CENTER_TITLE"]
+    globals()["TENSOR_CENTER_X"] = d["TENSOR_CENTER_X"]
+    globals()["TENSOR_CENTER_Y"] = d["TENSOR_CENTER_Y"]
+    globals()["BTN_DRAW_RIVER"] = d["BTN_DRAW_RIVER"]
+    globals()["BTN_ADD_CENTER"] = d["BTN_ADD_CENTER"]
+    globals()["BTN_CLEAR_CENTERS"] = d["BTN_CLEAR_CENTERS"]
+    globals()["TENSOR_CENTER_HINT"] = d["TENSOR_CENTER_HINT"]
+    globals()["HEIGHT_FIELD_TITLE"] = d["HEIGHT_FIELD_TITLE"]
+    globals()["USE_HEIGHT_FIELD"] = d["USE_HEIGHT_FIELD"]
+    globals()["BTN_LOAD_HEIGHT"] = d["BTN_LOAD_HEIGHT"]
+    globals()["BTN_CLEAR_HEIGHT"] = d["BTN_CLEAR_HEIGHT"]
+    globals()["HEIGHT_BLEND"] = d["HEIGHT_BLEND"]
+    globals()["HYPERSTREAMLINE_TITLE"] = d["HYPERSTREAMLINE_TITLE"]
+    globals()["HYPERSTREAMLINE_MAJOR"] = d["HYPERSTREAMLINE_MAJOR"]
+    globals()["HYPERSTREAMLINE_MINOR"] = d["HYPERSTREAMLINE_MINOR"]
+    globals()["HYPERSTREAMLINE_BOTH"] = d["HYPERSTREAMLINE_BOTH"]
+    globals()["BTN_ADD_SEED"] = d["BTN_ADD_SEED"]
+    globals()["BTN_CLEAR_SEEDS"] = d["BTN_CLEAR_SEEDS"]
+    globals()["HYPER_STEP_SIZE"] = d["HYPER_STEP_SIZE"]
+    globals()["HYPER_MAX_LENGTH"] = d["HYPER_MAX_LENGTH"]
+    globals()["HYPER_ANGLE_STOP"] = d["HYPER_ANGLE_STOP"]
 
 
 # --- English ---
@@ -137,13 +167,13 @@ _LANG_EN = {
         "footer": "Non-Radial Field Generator\nUrban Morphology Study Tool",
         "status_default": "COORD_SYSTEM: CARTESIAN\nEXPANSION_VECTOR: LINE_LOCAL_NORMAL\nSTATUS: REALTIME_CALCULATION",
     },
-    "RUN_MODE_OPTS": ["A - Flow Lines", "B - Street Network", "C - Parcel Blocks"],
+    "RUN_MODE_OPTS": ["A - Flow Lines", "B - Street Network", "C - Parcel Blocks", "D - Hyperstreamlines"],
     "ENGINE_OPTS": ["A. Offset", "B. Blended", "C. Scalar+Streamline"],
     "FIELD_TYPE_OPTS": [
         "1. Parallel Offset", "2. Curve Tangent", "3. Curve Normal", "4. Distance Contour",
         "5. Strip Growth", "6. Hybrid Tangent-Normal", "7. Noise-Modified Line Field",
     ],
-    "BASIS_TYPE_OPTS": ["Grid Basis", "Radial Basis", "Blend"],
+    "BASIS_TYPE_OPTS": ["Grid Basis", "Radial Basis", "Blend", "Boundary", "Boundary+Grid", "Height", "Height+Grid"],
     "SEED_TYPE_OPTS": ["Straight Line", "Sine Wave", "Arc / Curve", "Custom (Hand-drawn)"],
     "SPACING_MODE_OPTS": ["Linear", "Exponential Expansion", "Fibonacci Series"],
     "CURVE_SPACING_MODES": {"Linear": "linear", "Exponential Expansion": "exponential", "Fibonacci Series": "fibonacci"},
@@ -172,6 +202,24 @@ _LANG_EN = {
     "SCALAR_SIGMA": "Land Price Spread σ",
     "OFFSET_HINT": "Use Field Type below for offset mode",
     "BASIS_BLEND_FACTOR": "Blend Factor (0=Grid, 1=Radial)",
+    "RIVER_BOUNDARY_TITLE": "River / Boundary",
+    "USE_RIVER_BOUNDARY": "Use River Boundary",
+    "RIVER_FROM_CURVE": "From first curve",
+    "RIVER_FROM_IMAGE": "Load mask image",
+    "BOUNDARY_DECAY": "Boundary Decay",
+    "BOUNDARY_BLEND": "Boundary Blend (0=Grid, 1=Boundary)",
+    "TENSOR_CENTER_TITLE": "Tensor Center",
+    "TENSOR_CENTER_X": "Center X",
+    "TENSOR_CENTER_Y": "Center Y",
+    "BTN_ADD_CENTER": "Add Center",
+    "BTN_CLEAR_CENTERS": "Clear Centers",
+    "TENSOR_CENTER_HINT": "Click to add, drag to move",
+    "BTN_DRAW_RIVER": "Draw River",
+    "HEIGHT_FIELD_TITLE": "Height / Elevation",
+    "USE_HEIGHT_FIELD": "Use Height Map",
+    "BTN_LOAD_HEIGHT": "Load Height Map",
+    "BTN_CLEAR_HEIGHT": "Clear",
+    "HEIGHT_BLEND": "Height Blend (0=Grid, 1=Height)",
     "MULTI_SEED_HINT": "Select Custom to add multiple curves, each can be hand-drawn",
     "CURVE_PARAMS_HINT": "Select a curve in list to adjust its vector params",
     "CURVE_SELECT_HINT": "(Click Params in list to select curve)",
@@ -195,6 +243,15 @@ _LANG_EN = {
     "PARCEL_PERTURBATION_STR": "Perturbation Strength",
     "NO_CURVES_YET": "(No curves yet. Click + Add Curve)",
     "DRAW_MODE_STATUS": "DRAW MODE: Curve {} - Click to add points, drag to move",
+    "HYPERSTREAMLINE_TITLE": "Hyperstreamlines",
+    "HYPERSTREAMLINE_MAJOR": "Major (u)",
+    "HYPERSTREAMLINE_MINOR": "Minor (v)",
+    "HYPERSTREAMLINE_BOTH": "Both",
+    "BTN_ADD_SEED": "Add Seed Points",
+    "BTN_CLEAR_SEEDS": "Clear Seeds",
+    "HYPER_STEP_SIZE": "Step Size",
+    "HYPER_MAX_LENGTH": "Max Length (0=off)",
+    "HYPER_ANGLE_STOP": "Angle Stop (cos)",
 }
 
 # --- 中文 ---
@@ -242,13 +299,13 @@ _LANG_ZH = {
         "footer": "非径向向量场生成器\n城市形态学研究工具",
         "status_default": "坐标系: 笛卡尔\n扩张向量: 线局部法向\n状态: 实时计算",
     },
-    "RUN_MODE_OPTS": ["A - 流线", "B - 街道网络", "C - 地块"],
+    "RUN_MODE_OPTS": ["A - 流线", "B - 街道网络", "C - 地块", "D - 超流线"],
     "ENGINE_OPTS": ["A. 偏移", "B. 混合", "C. 标量+流线"],
     "FIELD_TYPE_OPTS": [
         "1. 平行偏移", "2. 曲线切向", "3. 曲线法向", "4. 距离等高线",
         "5. 条带生长", "6. 混合切向-法向", "7. 噪声修正线场",
     ],
-    "BASIS_TYPE_OPTS": ["网格基底", "径向基底", "混合"],
+    "BASIS_TYPE_OPTS": ["网格基底", "径向基底", "混合", "边界", "边界+网格", "高程", "高程+网格"],
     "SEED_TYPE_OPTS": ["直线", "正弦波", "弧线/曲线", "自定义（手绘）"],
     "SPACING_MODE_OPTS": ["线性", "指数扩张", "斐波那契"],
     "CURVE_SPACING_MODES": {"线性": "linear", "指数扩张": "exponential", "斐波那契": "fibonacci"},
@@ -277,6 +334,24 @@ _LANG_ZH = {
     "SCALAR_SIGMA": "地价扩散 σ",
     "OFFSET_HINT": "偏移模式请使用下方场类型",
     "BASIS_BLEND_FACTOR": "混合因子 (0=网格, 1=径向)",
+    "RIVER_BOUNDARY_TITLE": "河流 / 边界",
+    "USE_RIVER_BOUNDARY": "使用河流边界",
+    "RIVER_FROM_CURVE": "来自首条曲线",
+    "RIVER_FROM_IMAGE": "加载遮罩图像",
+    "BOUNDARY_DECAY": "边界衰减",
+    "BOUNDARY_BLEND": "边界混合 (0=网格, 1=边界)",
+    "TENSOR_CENTER_TITLE": "张量中心",
+    "TENSOR_CENTER_X": "中心 X",
+    "TENSOR_CENTER_Y": "中心 Y",
+    "BTN_ADD_CENTER": "添加中心",
+    "BTN_CLEAR_CENTERS": "清除中心",
+    "TENSOR_CENTER_HINT": "点击添加，拖动移动",
+    "BTN_DRAW_RIVER": "绘制河流",
+    "HEIGHT_FIELD_TITLE": "高程 / 地形",
+    "USE_HEIGHT_FIELD": "使用高程图",
+    "BTN_LOAD_HEIGHT": "加载高程图",
+    "BTN_CLEAR_HEIGHT": "清除",
+    "HEIGHT_BLEND": "高程混合 (0=网格, 1=高程)",
     "MULTI_SEED_HINT": "选择自定义以添加多条曲线，可手绘",
     "CURVE_PARAMS_HINT": "在列表中选中曲线以调整其向量参数",
     "CURVE_SELECT_HINT": "（点击列表中参数按钮选择曲线）",
@@ -301,6 +376,15 @@ _LANG_ZH = {
     "NO_CURVES_YET": "（暂无曲线，点击 + 添加曲线）",
     "DRAW_MODE_STATUS": "绘制模式：曲线 {} - 点击添加点，拖动移动",
     "BASIS_BLEND_FACTOR": "混合因子 (0=网格, 1=径向)",
+    "HYPERSTREAMLINE_TITLE": "超流线",
+    "HYPERSTREAMLINE_MAJOR": "主 (u)",
+    "HYPERSTREAMLINE_MINOR": "副 (v)",
+    "HYPERSTREAMLINE_BOTH": "主+副",
+    "BTN_ADD_SEED": "添加种子点",
+    "BTN_CLEAR_SEEDS": "清除种子",
+    "HYPER_STEP_SIZE": "步长",
+    "HYPER_MAX_LENGTH": "最大长度 (0=不限)",
+    "HYPER_ANGLE_STOP": "角度停止 (cos)",
 }
 
 # Initialize with English
@@ -338,6 +422,31 @@ SCALAR_CENTER_Y = _LANG_EN["SCALAR_CENTER_Y"]
 SCALAR_SIGMA = _LANG_EN["SCALAR_SIGMA"]
 OFFSET_HINT = _LANG_EN["OFFSET_HINT"]
 BASIS_BLEND_FACTOR = _LANG_EN["BASIS_BLEND_FACTOR"]
+RIVER_BOUNDARY_TITLE = _LANG_EN["RIVER_BOUNDARY_TITLE"]
+USE_RIVER_BOUNDARY = _LANG_EN["USE_RIVER_BOUNDARY"]
+BOUNDARY_DECAY = _LANG_EN["BOUNDARY_DECAY"]
+BOUNDARY_BLEND = _LANG_EN["BOUNDARY_BLEND"]
+TENSOR_CENTER_TITLE = _LANG_EN["TENSOR_CENTER_TITLE"]
+TENSOR_CENTER_X = _LANG_EN["TENSOR_CENTER_X"]
+TENSOR_CENTER_Y = _LANG_EN["TENSOR_CENTER_Y"]
+BTN_DRAW_RIVER = _LANG_EN["BTN_DRAW_RIVER"]
+BTN_ADD_CENTER = _LANG_EN["BTN_ADD_CENTER"]
+BTN_CLEAR_CENTERS = _LANG_EN["BTN_CLEAR_CENTERS"]
+TENSOR_CENTER_HINT = _LANG_EN["TENSOR_CENTER_HINT"]
+HEIGHT_FIELD_TITLE = _LANG_EN["HEIGHT_FIELD_TITLE"]
+USE_HEIGHT_FIELD = _LANG_EN["USE_HEIGHT_FIELD"]
+BTN_LOAD_HEIGHT = _LANG_EN["BTN_LOAD_HEIGHT"]
+BTN_CLEAR_HEIGHT = _LANG_EN["BTN_CLEAR_HEIGHT"]
+HEIGHT_BLEND = _LANG_EN["HEIGHT_BLEND"]
+HYPERSTREAMLINE_TITLE = _LANG_EN["HYPERSTREAMLINE_TITLE"]
+HYPERSTREAMLINE_MAJOR = _LANG_EN["HYPERSTREAMLINE_MAJOR"]
+HYPERSTREAMLINE_MINOR = _LANG_EN["HYPERSTREAMLINE_MINOR"]
+HYPERSTREAMLINE_BOTH = _LANG_EN["HYPERSTREAMLINE_BOTH"]
+BTN_ADD_SEED = _LANG_EN["BTN_ADD_SEED"]
+BTN_CLEAR_SEEDS = _LANG_EN["BTN_CLEAR_SEEDS"]
+HYPER_STEP_SIZE = _LANG_EN["HYPER_STEP_SIZE"]
+HYPER_MAX_LENGTH = _LANG_EN["HYPER_MAX_LENGTH"]
+HYPER_ANGLE_STOP = _LANG_EN["HYPER_ANGLE_STOP"]
 MULTI_SEED_HINT = _LANG_EN["MULTI_SEED_HINT"]
 CURVE_PARAMS_HINT = _LANG_EN["CURVE_PARAMS_HINT"]
 CURVE_SELECT_HINT = _LANG_EN["CURVE_SELECT_HINT"]

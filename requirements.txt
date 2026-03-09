@@ -1,3 +1,4 @@
 # 主程序无需额外依赖，仅 tkinter（随 Python 安装）
-# 以下为可选依赖，用于 DXF 导出：
-# ezdxf>=1.0.0
+# 以下为可选依赖：
+# ezdxf>=1.0.0          # DXF 导出
+# Pillow>=9.0.0        # 高程图 PNG/JPG 支持（无则仅支持 GIF）
