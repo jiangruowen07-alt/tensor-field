@@ -49,12 +49,14 @@ python urban_field_gen.py
 3. 点击 **Generate** 重新生成，点击 **Reset** 恢复默认参数。
 4. 可调整场地尺寸（Site Width / Height）、种子旋转、线间距等参数。
 5. 在 Mode B 或 C 下可进一步设置街道与地块相关参数。
+6. **导出到 Rhino**：点击 **Export .py (RhinoScript)** 保存 Python 脚本，在 Rhino 中打开 **EditPythonScript**，运行该脚本即可在视图中生成曲线；或点击 **Export DXF** 导出 DXF 文件（需 `pip install ezdxf`），在 Rhino 中直接导入。导出时以场地矩形（Site Width × Site Height）为边界，自动裁剪掉超出边界的线，仅保留内部部分。
 
 ## 项目结构
 
 ```
 strip-field/
 ├── urban_field_gen.py   # 主程序入口
+├── requirements.txt    # 可选依赖（DXF 导出需 ezdxf）
 ├── output.svg           # 示例输出
 ├── flow.svg
 ├── output_b.svg

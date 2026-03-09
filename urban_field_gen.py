@@ -6,7 +6,7 @@ Python 重写版本 - 逻辑完全一致
 """
 
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, filedialog
 import math
 import random
 
@@ -22,6 +22,141 @@ def lerp(a, b, t):
 def noise(x, y):
     """简易噪声函数 (Lattice Noise)"""
     return (math.sin(x * 0.01) * math.cos(y * 0.01) + math.sin(x * 0.02 + y * 0.015)) * 0.5
+
+
+def _inside(p, xmin, ymin, xmax, ymax):
+    """点是否在矩形内"""
+    return xmin <= p[0] <= xmax and ymin <= p[1] <= ymax
+
+
+def _clip_segment_to_rect(p0, p1, xmin, ymin, xmax, ymax):
+    """Cohen-Sutherland 线段裁剪，返回裁剪后的线段 [(x,y),(x,y)] 或 None，顺序与 p0->p1 一致"""
+    x0, y0 = p0
+    x1, y1 = p1
+    orig_p0 = p0
+    LEFT, RIGHT, BOTTOM, TOP = 1, 2, 4, 8
+
+    def code(x, y):
+        c = 0
+        if x < xmin:
+            c |= LEFT
+        elif x > xmax:
+            c |= RIGHT
+        if y < ymin:
+            c |= BOTTOM
+        elif y > ymax:
+            c |= TOP
+        return c
+
+    c0, c1 = code(x0, y0), code(x1, y1)
+    while True:
+        if c0 == 0 and c1 == 0:
+            a, b = (x0, y0), (x1, y1)
+            # 保证顺序与 p0->p1 一致（a 靠近 p0）
+            d_a = (a[0] - orig_p0[0]) ** 2 + (a[1] - orig_p0[1]) ** 2
+            d_b = (b[0] - orig_p0[0]) ** 2 + (b[1] - orig_p0[1]) ** 2
+            if d_a > d_b:
+                a, b = b, a
+            return [a, b]
+        if c0 & c1:
+            return None
+        if c0 == 0:
+            x0, y0, x1, y1, c0, c1 = x1, y1, x0, y0, c1, c0
+        c = c0
+        if c & LEFT:
+            y0 = y0 + (y1 - y0) * (xmin - x0) / (x1 - x0) if x1 != x0 else y0
+            x0 = xmin
+        elif c & RIGHT:
+            y0 = y0 + (y1 - y0) * (xmax - x0) / (x1 - x0) if x1 != x0 else y0
+            x0 = xmax
+        elif c & BOTTOM:
+            x0 = x0 + (x1 - x0) * (ymin - y0) / (y1 - y0) if y1 != y0 else x0
+            y0 = ymin
+        elif c & TOP:
+            x0 = x0 + (x1 - x0) * (ymax - y0) / (y1 - y0) if y1 != y0 else x0
+            y0 = ymax
+        c0 = code(x0, y0)
+
+
+def _same_pt(a, b, tol=1e-10):
+    return abs(a[0] - b[0]) < tol and abs(a[1] - b[1]) < tol
+
+
+def _clip_polyline_to_rect(pts, xmin, ymin, xmax, ymax):
+    """折线裁剪到矩形，返回裁剪后的折线列表（可能被裁成多段）"""
+    if len(pts) < 2:
+        return []
+    result = []
+    current = []
+    for i in range(len(pts) - 1):
+        p0, p1 = pts[i], pts[i + 1]
+        seg = _clip_segment_to_rect(p0, p1, xmin, ymin, xmax, ymax)
+        if seg is None:
+            if current:
+                result.append(current)
+                current = []
+            continue
+        a, b = seg[0], seg[1]
+        if not current:
+            current = [a]
+        elif not _same_pt(a, current[-1]):
+            result.append(current)
+            current = [a]
+        if not _same_pt(b, a):
+            current.append(b)
+        if not _inside(p1, xmin, ymin, xmax, ymax):
+            result.append(current)
+            current = []
+    if current:
+        result.append(current)
+    return [p for p in result if len(p) >= 2]
+
+
+def _clip_polygon_to_rect(pts, xmin, ymin, xmax, ymax):
+    """Sutherland-Hodgman 多边形裁剪到矩形，返回裁剪后的多边形列表"""
+    if len(pts) < 3:
+        return []
+
+    def cross_inside(px, py, x1, y1, x2, y2):
+        """点 (px,py) 在边 (x1,y1)->(x2,y2) 的 inside 侧（左侧）"""
+        return (x2 - x1) * (py - y1) - (y2 - y1) * (px - x1) >= 0
+
+    def intersect(p, q, x1, y1, x2, y2):
+        """线段 PQ 与边 (x1,y1)->(x2,y2) 的交点"""
+        px, py = p
+        qx, qy = q
+        dx, dy = qx - px, qy - py
+        ex, ey = x2 - x1, y2 - y1
+        denom = ex * dy - ey * dx
+        if abs(denom) < 1e-12:
+            return (px, py)
+        t = (ex * (y1 - py) - ey * (x1 - px)) / denom
+        t = max(0, min(1, t))
+        return (px + t * dx, py + t * dy)
+
+    def clip_edge(subject, x1, y1, x2, y2):
+        out = []
+        for i in range(len(subject)):
+            v1 = subject[i]
+            v0 = subject[(i - 1) % len(subject)]
+            inside_v0 = cross_inside(v0[0], v0[1], x1, y1, x2, y2)
+            inside_v1 = cross_inside(v1[0], v1[1], x1, y1, x2, y2)
+            if inside_v0 and inside_v1:
+                out.append(v1)
+            elif inside_v0 and not inside_v1:
+                out.append(intersect(v0, v1, x1, y1, x2, y2))
+            elif not inside_v0 and inside_v1:
+                out.append(intersect(v0, v1, x1, y1, x2, y2))
+                out.append(v1)
+        return out
+
+    poly = list(pts)
+    for (x1, y1, x2, y2) in [(xmin, ymin, xmax, ymin), (xmax, ymin, xmax, ymax),
+                             (xmax, ymax, xmin, ymax), (xmin, ymax, xmin, ymin)]:
+        poly = clip_edge(poly, x1, y1, x2, y2)
+        if not poly:
+            return []
+    return [poly] if len(poly) >= 3 else []
 
 
 class UrbanFieldGenerator:
@@ -42,6 +177,7 @@ class UrbanFieldGenerator:
         self.drag_point_idx = None  # 正在拖动的控制点索引
         self._canvas_custom_bound = False
         self._curve_list_frame = None  # 母线列表容器，用于动态刷新
+        self._export_geometry = {"polylines": [], "parcels": []}  # 用于导出到 Rhino/DXF
 
         self._build_ui()
         self._bind_events()
@@ -301,6 +437,22 @@ class UrbanFieldGenerator:
                            font=("JetBrains Mono", 10, "bold"),
                            activebackground="#ffffff", activeforeground="#0a0a0a")
         btn_gen.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 0))
+
+        # Export buttons
+        export_frame = tk.Frame(panel, bg="#141414")
+        export_frame.pack(fill=tk.X, pady=(16, 0))
+        tk.Label(export_frame, text="Export for Rhino:", fg="#888888", bg="#141414",
+                 font=("Inter", 10)).pack(anchor="w")
+        exp_btn_frame = tk.Frame(export_frame, bg="#141414")
+        exp_btn_frame.pack(fill=tk.X, pady=(4, 0))
+        btn_export_rhino = tk.Button(exp_btn_frame, text="Export .py (RhinoScript)", command=self._export_rhino,
+                                    bg="#2a4a6a", fg="#e0e0e0", relief=tk.SOLID, bd=1,
+                                    font=("JetBrains Mono", 10))
+        btn_export_rhino.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+        btn_export_dxf = tk.Button(exp_btn_frame, text="Export DXF", command=self._export_dxf,
+                                  bg="#2a4a6a", fg="#e0e0e0", relief=tk.SOLID, bd=1,
+                                  font=("JetBrains Mono", 10))
+        btn_export_dxf.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 0))
 
         tk.Label(panel, text="Non-Radial Field Generator\nUrban Morphology Study Tool",
                  fg="#888888", bg="#141414", font=("Inter", 9)).pack(pady=(32, 0))
@@ -1109,6 +1261,9 @@ class UrbanFieldGenerator:
         """lines_by_curve: 每条母线一组 [[line1, line2, ...], ...]；cross_spacings: 每条母线的道路疏密(值越小越密)"""
         s = self.state
         cross_spacings = cross_spacings or [s["crossSpacing"]]
+        # 重置导出几何数据
+        self._export_geometry = {"polylines": [], "parcels": []}
+
         # 绘制场地边界（1:6 横向矩形）
         self.canvas.create_rectangle(0, 0, s["siteWidth"], s["siteHeight"],
                                      outline="#555555", width=2, dash=(4, 4))
@@ -1128,6 +1283,7 @@ class UrbanFieldGenerator:
                     color = curve_color if idx == 0 else "#999999"
                     width = 2 if idx == 0 else 0.5
                     pts = [(p["x"], p["y"]) for p in line]
+                    self._export_geometry["polylines"].append(pts)
                     for i in range(len(pts) - 1):
                         self.canvas.create_line(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1],
                                                fill=color, width=width)
@@ -1136,6 +1292,7 @@ class UrbanFieldGenerator:
                 # 1. Longitudinal lines (∥向量线)
                 for line in lines:
                     pts = [(p["x"], p["y"]) for p in line]
+                    self._export_geometry["polylines"].append(pts)
                     fill, w = (cross_color, cross_w) if perp else (main_color, main_w)
                     for i in range(len(pts) - 1):
                         self.canvas.create_line(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1],
@@ -1153,6 +1310,7 @@ class UrbanFieldGenerator:
                     for line in sorted_lines:
                         p = line[idx]
                         cross_pts.append((p["x"], p["y"]))
+                    self._export_geometry["polylines"].append(cross_pts)
                     fill, w = (main_color, main_w) if perp else (cross_color, cross_w)
                     for i in range(len(cross_pts) - 1):
                         self.canvas.create_line(cross_pts[i][0], cross_pts[i][1], cross_pts[i + 1][0], cross_pts[i + 1][1],
@@ -1172,6 +1330,8 @@ class UrbanFieldGenerator:
 
                             p1, p2 = line_a[idx_s], line_b[idx_s]
                             p3, p4 = line_b[idx_e], line_a[idx_e]
+                            parcel_pts = [(p1["x"], p1["y"]), (p2["x"], p2["y"]), (p3["x"], p3["y"]), (p4["x"], p4["y"])]
+                            self._export_geometry["parcels"].append(parcel_pts)
 
                             if random.random() > 0.15:
                                 gray = int(255 * (0.05 + random.random() * 0.1))
@@ -1228,6 +1388,96 @@ class UrbanFieldGenerator:
             pass  # 需在创建时绑定
         for child in widget.winfo_children():
             self._bind_recursive(child, callback)
+
+    def _get_clipped_geometry(self):
+        """以场地矩形为边界裁剪几何体，仅保留内部部分"""
+        xmin, ymin = 0, 0
+        xmax = self.state.get("siteWidth", 1200)
+        ymax = self.state.get("siteHeight", 200)
+        polylines = []
+        for pts in self._export_geometry["polylines"]:
+            polylines.extend(_clip_polyline_to_rect(pts, xmin, ymin, xmax, ymax))
+        parcels = []
+        for pts in self._export_geometry["parcels"]:
+            parcels.extend(_clip_polygon_to_rect(pts, xmin, ymin, xmax, ymax))
+        return {"polylines": polylines, "parcels": parcels}
+
+    def _export_rhino(self):
+        """导出 RhinoScript (.py)，可在 Rhino 的 Python 编辑器中运行"""
+        if not self._export_geometry["polylines"] and not self._export_geometry["parcels"]:
+            self.status_label.config(text="No geometry to export. Generate first.")
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".py",
+            filetypes=[("Python script", "*.py"), ("All files", "*.*")],
+            title="Export for Rhino"
+        )
+        if not path:
+            return
+        geo = self._get_clipped_geometry()
+        if not geo["polylines"] and not geo["parcels"]:
+            self.status_label.config(text="No geometry inside boundary after clip.")
+            return
+        lines = []
+        lines.append('"""Strip Field Export - Run in Rhino Python Editor (EditPythonScript)"""')
+        lines.append("import rhinoscriptsyntax as rs")
+        lines.append("")
+        lines.append("# Clipped to site boundary rectangle")
+        lines.append("")
+        for pts in geo["polylines"]:
+            if len(pts) < 2:
+                continue
+            pts_str = ", ".join(f"({p[0]:.4f}, {p[1]:.4f}, 0)" for p in pts)
+            lines.append(f"rs.AddCurve([{pts_str}])")
+        for pts in geo["parcels"]:
+            if len(pts) < 3:
+                continue
+            closed_pts = pts + [pts[0]]
+            pts_str = ", ".join(f"({p[0]:.4f}, {p[1]:.4f}, 0)" for p in closed_pts)
+            lines.append(f"rs.AddCurve([{pts_str}], 1)  # parcel (closed)")
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines))
+            self.status_label.config(text=f"Exported to {path}")
+        except Exception as e:
+            self.status_label.config(text=f"Export failed: {e}")
+
+    def _export_dxf(self):
+        """导出 DXF，Rhino 可直接导入"""
+        if not self._export_geometry["polylines"] and not self._export_geometry["parcels"]:
+            self.status_label.config(text="No geometry to export. Generate first.")
+            return
+        try:
+            import ezdxf
+        except ImportError:
+            self.status_label.config(text="DXF export requires: pip install ezdxf")
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".dxf",
+            filetypes=[("DXF file", "*.dxf"), ("All files", "*.*")],
+            title="Export DXF"
+        )
+        if not path:
+            return
+        geo = self._get_clipped_geometry()
+        if not geo["polylines"] and not geo["parcels"]:
+            self.status_label.config(text="No geometry inside boundary after clip.")
+            return
+        try:
+            doc = ezdxf.new("R2010")
+            msp = doc.modelspace()
+            for pts in geo["polylines"]:
+                if len(pts) < 2:
+                    continue
+                msp.add_lwpolyline([(p[0], p[1]) for p in pts])
+            for pts in geo["parcels"]:
+                if len(pts) < 3:
+                    continue
+                msp.add_lwpolyline([(p[0], p[1]) for p in pts], close=True)
+            doc.saveas(path)
+            self.status_label.config(text=f"Exported to {path}")
+        except Exception as e:
+            self.status_label.config(text=f"Export failed: {e}")
 
     def _reset(self):
         self.controls["seedRotation"].set(0)
