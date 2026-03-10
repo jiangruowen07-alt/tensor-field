@@ -87,20 +87,19 @@ def extract_boundary_from_curve(points, num_samples=120):
 def nearest_on_boundary(x, y, boundary):
     """
     求 (x,y) 到边界的最短距离点。
-    Returns: (bx, by, tx, ty, dist) 或 None
+    Returns: (bx, by, tx, ty, d2) 或 None，d2 为平方距离
     """
     if not boundary:
         return None
     best = None
     best_d2 = 1e30
-    n = len(boundary)
-    for i in range(n):
+    for i in range(len(boundary)):
         bx, by, tx, ty = boundary[i][0], boundary[i][1], boundary[i][2], boundary[i][3]
-        # 点到线段的距离（近似为点到采样点）
-        d2 = (x - bx) ** 2 + (y - by) ** 2
+        dx, dy = x - bx, y - by
+        d2 = dx * dx + dy * dy
         if d2 < best_d2:
             best_d2 = d2
-            best = (bx, by, tx, ty, math.sqrt(d2))
+            best = (bx, by, tx, ty, d2)
     return best
 
 
@@ -114,9 +113,9 @@ def boundary_tensor_at(x, y, boundary, decay=150):
     nn = nearest_on_boundary(x, y, boundary)
     if nn is None:
         return None
-    bx, by, tx, ty, dist = nn
-    # 衰减权重：exp(-d^2 / decay^2)
-    w = math.exp(-(dist * dist) / (decay * decay))
+    bx, by, tx, ty, d2 = nn
+    decay_sq = decay * decay
+    w = math.exp(-d2 / decay_sq)
     if w < 0.01:
         return None  # 太远，不贡献
     ux, uy = tx, ty

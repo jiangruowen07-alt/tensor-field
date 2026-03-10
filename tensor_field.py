@@ -202,10 +202,10 @@ def _build_design_elements(basis, centers, blend_factor,
         elements.append({"type": "grid", "pos": (cx0, cy0), "tensor_const": t, "weight": 1.0, "rbf_decay": 0})
 
     elif basis == BASIS_RADIAL:
-        # 径向基底：副特征向量指向中心，所有副超流线汇聚于中心导致团状。
-        # 混入少量网格分量（约 18%）打破完美径向，使街道分散。
+        # 径向基底：不让 radial 独占全局，自动加入更强的 grid 分量。
+        # grid 主导全局，radial 作为局部扰动，避免窄场地内大量线被裁剪。
         t_grid = _tensor_from_direction(1.0, 0.0)
-        elements.append({"type": "grid", "pos": (cx0, cy0), "tensor_const": t_grid, "weight": 0.18, "rbf_decay": 0})
+        elements.append({"type": "grid", "pos": (cx0, cy0), "tensor_const": t_grid, "weight": 0.55, "rbf_decay": 0})
         for cx, cy in centers:
             def radial_fn(px, py, cxx=cx, cyy=cy):
                 dx = px - cxx
@@ -423,6 +423,45 @@ def laplacian_smooth_tensor_grid(grid_a, grid_b, nx, ny, iterations=3):
         src_a, dst_a = dst_a, src_a
         src_b, dst_b = dst_b, src_b
     return src_a, src_b
+
+
+def create_tensor_grid_fn(tensor_fn, site_width, site_height, grid_step=40):
+    """
+    预计算张量场网格，用双线性插值替代每次完整计算。
+    用于超流线加速：一次采样 ~(w/step)*(h/step) 点，之后每次查询 O(1)。
+    """
+    nx = max(2, int(site_width / grid_step) + 1)
+    ny = max(2, int(site_height / grid_step) + 1)
+    inv_nx = 1.0 / max(nx - 1, 1)
+    inv_ny = 1.0 / max(ny - 1, 1)
+    grid_a = [[0.0] * nx for _ in range(ny)]
+    grid_b = [[0.0] * nx for _ in range(ny)]
+    for j in range(ny):
+        for i in range(nx):
+            x = i * inv_nx * site_width
+            y = j * inv_ny * site_height
+            ux, uy, vx, vy = tensor_fn(x, y)
+            theta = math.atan2(uy, ux)
+            theta2 = 2 * theta
+            grid_a[j][i] = math.cos(theta2)
+            grid_b[j][i] = math.sin(theta2)
+
+    inv_w = 1.0 / site_width if site_width > 0 else 0
+    inv_h = 1.0 / site_height if site_height > 0 else 0
+    nx1, ny1 = nx - 1, ny - 1
+
+    def grid_fn(x, y):
+        xi = x * inv_w * nx1
+        yi = y * inv_h * ny1
+        i0 = max(0, min(nx - 2, int(xi)))
+        j0 = max(0, min(ny - 2, int(yi)))
+        u, v = xi - i0, yi - j0
+        omu, omv = 1 - u, 1 - v
+        a = omu * omv * grid_a[j0][i0] + omu * v * grid_a[j0+1][i0] + u * omv * grid_a[j0][i0+1] + u * v * grid_a[j0+1][i0+1]
+        b = omu * omv * grid_b[j0][i0] + omu * v * grid_b[j0+1][i0] + u * omv * grid_b[j0][i0+1] + u * v * grid_b[j0+1][i0+1]
+        return _tensor_to_eigenvectors(a, b) or (1.0, 0.0, 0.0, 1.0)
+
+    return grid_fn
 
 
 def create_smoothed_tensor_fn(tensor_fn, site_width, site_height, grid_step=20, smooth_iterations=3):

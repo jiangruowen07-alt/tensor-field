@@ -34,8 +34,10 @@ def clip_segment_to_rect(p0, p1, xmin, ymin, xmax, ymax):
     while True:
         if c0 == 0 and c1 == 0:
             a, b = (x0, y0), (x1, y1)
-            d_a = (a[0] - orig_p0[0]) ** 2 + (a[1] - orig_p0[1]) ** 2
-            d_b = (b[0] - orig_p0[0]) ** 2 + (b[1] - orig_p0[1]) ** 2
+            da0, da1 = a[0] - orig_p0[0], a[1] - orig_p0[1]
+            db0, db1 = b[0] - orig_p0[0], b[1] - orig_p0[1]
+            d_a = da0 * da0 + da1 * da1
+            d_b = db0 * db0 + db1 * db1
             if d_a > d_b:
                 a, b = b, a
             return [a, b]

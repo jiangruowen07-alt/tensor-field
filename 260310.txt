@@ -1,0 +1,1770 @@
+﻿diff --git a/README.md b/README.md
+index 883756c..8a45ebe 100644
+--- a/README.md
++++ b/README.md
+@@ -80,7 +80,7 @@ tensor-field/
+ 鈹溾攢鈹€ i18n.py              # 涓嫳鏂囧弻璇晫闈? 鈹溾攢鈹€ parcel_subdivision.py # 鍦板潡鍒掑垎锛坒rontage-based銆乥lock-by-block銆佽浆瑙掋€佹壈鍔級
+ 鈹溾攢鈹€ config.py            # 閰嶇疆甯搁噺锛圱_STEP, T_COUNT锛?-鈹溾攢鈹€ utils.py             # 宸ュ叿鍑芥暟锛坙erp, noise, perlin_noise, safe_float, safe_int锛?+鈹溾攢鈹€ utils.py             # 宸ュ叿鍑芥暟锛坙erp, perlin_noise, safe_float, safe_int锛? 鈹溾攢鈹€ geom.py              # 鍑犱綍瑁佸壀锛堢嚎娈?鎶樼嚎/澶氳竟褰㈣鍓埌鐭╁舰锛? 鈹溾攢鈹€ curve.py             # 鏇茬嚎鎻掑€硷紙Catmull-Rom 鏍锋潯銆佸姬闀块噰鏍凤級
+ 鈹溾攢鈹€ street_network.py    # 琛楅亾缃戠粶锛堥亾璺瓑绾с€佽嚜閫傚簲妯锛?diff --git a/app.py b/app.py
+index cf26972..ef5a5af 100644
+--- a/app.py
++++ b/app.py
+@@ -45,6 +45,7 @@ from tensor_field import (
+     sample_tensor_field_grid,
+     generate_streets_from_tensor_field,
+     create_tensor_field_fn,
++    create_tensor_grid_fn,
+     create_smoothed_tensor_fn,
+     BASIS_GRID,
+     BASIS_RADIAL,
+@@ -88,6 +89,9 @@ class UrbanFieldGenerator:
+         self._gen_queue = queue.Queue()
+         self._gen_thread = None
+         self._gen_polling = False
++        self._generation_id = 0
++        self._last_tensor_fn = None
++        self._last_hyper_seeds = None
+         self._river_mask_image = None
+         self._height_image = None
+         self._height_gradient_fn = None
+@@ -98,6 +102,13 @@ class UrbanFieldGenerator:
+         self.brush_draw_mode = False
+         self._current_brush_stroke = []
+ 
++        # 瑙嗗浘缂╂斁涓庡钩绉?+        self._view_zoom = 1.0
++        self._view_cx = 600.0  # 瑙嗗彛涓績瀵瑰簲鐨勯€昏緫鍧愭爣 x
++        self._view_cy = 100.0  # 瑙嗗彛涓績瀵瑰簲鐨勯€昏緫鍧愭爣 y
++        self._pan_start = None  # (canvas_x, canvas_y, view_cx, view_cy) 鎷栧姩寮€濮嬫椂
++        self._last_applied_result = None  # 涓婃缁樺埗缁撴灉锛岀敤浜庡钩绉?缂╂斁鏃跺揩閫熼噸缁?+
+         self._build_ui()
+         self._bind_events()
+         self.update_state()
+@@ -224,13 +235,13 @@ class UrbanFieldGenerator:
+         tk.Checkbutton(panel, text=TWO_STAGE, variable=self.controls["twoStage"], command=self.update_state,
+                       bg="#141414", fg="#e0e0e0", selectcolor="#1a1a1a", activebackground="#141414",
+                       activeforeground="#e0e0e0", font=("Inter", 9)).pack(anchor="w", pady=(0, 4))
+-        self._label_group(panel, PERLIN_ROTATION, "0.2", right_key="perlinStrVal", t_key="perlin_strength")
++        self._label_group(panel, PERLIN_ROTATION, "0.05", right_key="perlinStrVal", t_key="perlin_strength")
+         self.controls["perlinStrength"] = tk.Scale(panel, from_=0, to=1, resolution=0.05, orient=tk.HORIZONTAL,
+                                                   bg="#141414", fg="#e0e0e0", troughcolor="#2a2a2a",
+                                                   highlightthickness=0, showvalue=False, command=lambda v: self.update_state())
+-        self.controls["perlinStrength"].set(0.2)
++        self.controls["perlinStrength"].set(0.05)
+         self.controls["perlinStrength"].pack(fill=tk.X, pady=(0, 4))
+-        self.controls["laplacianSmooth"] = tk.BooleanVar(value=False)
++        self.controls["laplacianSmooth"] = tk.BooleanVar(value=True)
+         tk.Checkbutton(panel, text=LAPLACIAN_SMOOTH, variable=self.controls["laplacianSmooth"], command=self.update_state,
+                       bg="#141414", fg="#e0e0e0", selectcolor="#1a1a1a", activebackground="#141414",
+                       activeforeground="#e0e0e0", font=("Inter", 9)).pack(anchor="w", pady=(0, 4))
+@@ -252,11 +263,11 @@ class UrbanFieldGenerator:
+         tk.Label(panel, text="", bg="#141414", font=("Inter", 4)).pack()
+ 
+         self._section_labels.append(self._section_title(panel, T["section_expansion"]))
+-        self._label_group(panel, T["line_spacing"], "65", right_key="spacingVal", t_key="line_spacing")
++        self._label_group(panel, T["line_spacing"], "20", right_key="spacingVal", t_key="line_spacing")
+         self.controls["lineSpacing"] = tk.Scale(panel, from_=20, to=120, orient=tk.HORIZONTAL,
+                                                 bg="#141414", fg="#e0e0e0", troughcolor="#2a2a2a",
+                                                 highlightthickness=0, showvalue=False)
+-        self.controls["lineSpacing"].set(65)
++        self.controls["lineSpacing"].set(20)
+         self.controls["lineSpacing"].pack(fill=tk.X, pady=(0, 10))
+ 
+         self._label_group(panel, T["pos_count"], t_key="pos_count")
+@@ -422,7 +433,8 @@ class UrbanFieldGenerator:
+         canvas_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=32, pady=32)
+         self.canvas = tk.Canvas(canvas_frame, bg="#050505", highlightthickness=0)
+         self.canvas.pack(expand=True)
+-        self.status_label = tk.Label(canvas_frame, text=T["status_default"],
++        _status = T["status_default"] + "\n" + T.get("status_view_hint", "")
++        self.status_label = tk.Label(canvas_frame, text=_status,
+                                     fg="#4d4d4d", bg="#050505", font=("JetBrains Mono", 9),
+                                     justify=tk.RIGHT, wraplength=280)
+         self.status_label.place(relx=1.0, rely=1.0, anchor="se", x=-32, y=-32)
+@@ -469,6 +481,17 @@ class UrbanFieldGenerator:
+         """For offset engine (B/C): default to parallel"""
+         return "1"
+ 
++    def _clamp_centers(self):
++        """灏嗘墍鏈?tensor center 闄愬埗鍦ㄥ満鍦板唴閮?x鈭圼0,siteWidth] y鈭圼0,siteHeight]"""
++        w = self.state.get("siteWidth", 1200)
++        h = self.state.get("siteHeight", 200)
++        self.tensor_centers = [
++            (max(0, min(w, cx)), max(0, min(h, cy)))
++            for cx, cy in self.tensor_centers
++        ]
++        if not self.tensor_centers:
++            self.tensor_centers = [(w / 2, h / 2)]
++
+     def _get_basis_type(self):
+         val = self.controls["basisType"].get()
+         if "Radial" in val or "寰勫悜" in val:
+@@ -491,13 +514,13 @@ class UrbanFieldGenerator:
+             w.destroy()
+         basis = self._get_basis_type()
+         if basis == BASIS_BLEND:
+-            self._label_group(self._basis_params_frame, BASIS_BLEND_FACTOR, "0.5", right_key="basisBlendVal", t_key="BASIS_BLEND_FACTOR")
++            self._label_group(self._basis_params_frame, BASIS_BLEND_FACTOR, "0.35", right_key="basisBlendVal", t_key="BASIS_BLEND_FACTOR")
+             self.controls["basisBlendFactor"] = tk.Scale(
+                 self._basis_params_frame, from_=0, to=1, resolution=0.1, orient=tk.HORIZONTAL,
+                 bg="#141414", fg="#e0e0e0", troughcolor="#2a2a2a",
+                 highlightthickness=0, showvalue=False,
+                 command=lambda v: self._update_basis_blend_label())
+-            self.controls["basisBlendFactor"].set(0.5)
++            self.controls["basisBlendFactor"].set(0.35)
+             self.controls["basisBlendFactor"].pack(fill=tk.X, pady=(0, 4))
+             self._bind_recursive(self._basis_params_frame, self.update_state)
+         elif basis in (BASIS_BOUNDARY, BASIS_BOUNDARY_BLEND):
+@@ -532,6 +555,11 @@ class UrbanFieldGenerator:
+             self._bind_recursive(self._basis_params_frame, self.update_state)
+         self._build_river_boundary_ui()
+         self._build_height_field_ui()
++        w, h = safe_float(self.controls["siteWidth"].get(), 1200), safe_float(self.controls["siteHeight"].get(), 200)
++        if basis == BASIS_BLEND:
++            self.tensor_centers = [(400, 100), (800, 100)]
++        elif basis == BASIS_RADIAL:
++            self.tensor_centers = [(300, 100), (600, 100), (900, 100)]
+         self.update_state()
+ 
+     def _build_river_boundary_ui(self):
+@@ -638,12 +666,12 @@ class UrbanFieldGenerator:
+         else:
+             if "btnAddSeed" in self.controls:
+                 self.controls["btnAddSeed"].config(text=BTN_ADD_SEED, bg="#2a4a3a")
+-            self.status_label.config(text=T["status_default"])
++            self.status_label.config(text=T["status_default"] + "\n" + T.get("status_view_hint", ""))
+         self.update_state()
+ 
+     def _clear_hyper_seeds(self):
+         self.hyperstreamline_seeds.clear()
+-        self.update_state()
++        self.update_state(immediate=True)
+ 
+     def _update_height_blend_label(self):
+         if "heightBlendVal" in self.controls and "heightBlendFactor" in self.controls:
+@@ -715,14 +743,14 @@ class UrbanFieldGenerator:
+         else:
+             if "btnAddCenter" in self.controls:
+                 self.controls["btnAddCenter"].config(text=BTN_ADD_CENTER, bg="#2a4a3a")
+-            self.status_label.config(text=T["status_default"])
++            self.status_label.config(text=T["status_default"] + "\n" + T.get("status_view_hint", ""))
+         self.update_state()
+ 
+     def _clear_tensor_centers(self):
+         w = safe_float(self.controls["siteWidth"].get(), 1200)
+         h = safe_float(self.controls["siteHeight"].get(), 200)
+         self.tensor_centers = [(w / 2, h / 2)]
+-        self.update_state()
++        self.update_state(immediate=True)
+ 
+     def _toggle_brush_mode(self):
+         self.brush_draw_mode = not self.brush_draw_mode
+@@ -737,13 +765,13 @@ class UrbanFieldGenerator:
+             self._current_brush_stroke = []
+             if "btnDrawBrush" in self.controls:
+                 self.controls["btnDrawBrush"].config(text=BTN_DRAW_BRUSH, bg="#2a4a3a")
+-            self.status_label.config(text=T["status_default"])
++            self.status_label.config(text=T["status_default"] + "\n" + T.get("status_view_hint", ""))
+         self.update_state()
+ 
+     def _clear_brush(self):
+         self.brush_strokes = []
+         self._current_brush_stroke = []
+-        self.update_state()
++        self.update_state(immediate=True)
+ 
+     def _update_boundary_labels(self):
+         if "boundaryDecayVal" in self.controls and "boundaryDecay" in self.controls:
+@@ -824,7 +852,7 @@ class UrbanFieldGenerator:
+         self.editing_curve_index = -1
+         if self.draw_mode:
+             self._exit_draw_mode()
+-        self.update_state()
++        self.update_state(immediate=True)
+ 
+     def _toggle_draw_mode(self):
+         if self.draw_mode:
+@@ -838,7 +866,7 @@ class UrbanFieldGenerator:
+         self.editing_curve_index = -1
+         if "btnDrawRiver" in self.controls and self.controls["btnDrawRiver"].winfo_exists():
+             self.controls["btnDrawRiver"].config(text=BTN_DRAW_RIVER, bg="#2a4a2a")
+-        self.status_label.config(text=T["status_default"])
++        self.status_label.config(text=T["status_default"] + "\n" + T.get("status_view_hint", ""))
+         self._refresh_curve_list()
+ 
+     def _find_point_at(self, canvas_x, canvas_y, radius=10):
+@@ -847,7 +875,8 @@ class UrbanFieldGenerator:
+         for ci, curve in enumerate(self.custom_seed_curves):
+             pts = self._get_curve_points(curve)
+             for pi, (px, py) in enumerate(pts):
+-                d = (lx - px) ** 2 + (ly - py) ** 2
++                dx, dy = lx - px, ly - py
++                d = dx * dx + dy * dy
+                 if d < best_d:
+                     best_d, best_ci, best_pi = d, ci, pi
+         return (best_ci, best_pi)
+@@ -857,7 +886,8 @@ class UrbanFieldGenerator:
+         best_i, best_d = -1, radius * radius
+         for i, (cx, cy) in enumerate(self.tensor_centers):
+             px, py = self._pad(cx, cy)
+-            d = (canvas_x - px) ** 2 + (canvas_y - py) ** 2
++            dx, dy = canvas_x - px, canvas_y - py
++            d = dx * dx + dy * dy
+             if d < best_d:
+                 best_d, best_i = d, i
+         return best_i
+@@ -903,7 +933,8 @@ class UrbanFieldGenerator:
+             ly = max(0, min(h, ly))
+             if 0 <= self.drag_center_idx < len(self.tensor_centers):
+                 self.tensor_centers[self.drag_center_idx] = (lx, ly)
+-                self.update_state(immediate=True)
++                self.state["tensorCenters"] = list(self.tensor_centers)
++                self._redraw_from_last(override_centers=self.tensor_centers)
+             return
+         if self.drag_curve_idx is not None and self.drag_point_idx is not None:
+             pts = self._get_curve_points(self.custom_seed_curves[self.drag_curve_idx])
+@@ -911,12 +942,16 @@ class UrbanFieldGenerator:
+                 lx, ly = self._unpad(event.x, event.y)
+                 pts[self.drag_point_idx] = (lx, ly)
+                 self._refresh_curve_list()
+-                self.update_state(immediate=True)
++                self._redraw_from_last()
+ 
+     def _on_canvas_release(self, event):
++        was_dragging_center = self.drag_center_idx is not None
++        was_dragging_curve = self.drag_curve_idx is not None
+         self.drag_curve_idx = None
+         self.drag_point_idx = None
+         self.drag_center_idx = None
++        if was_dragging_center or was_dragging_curve:
++            self.update_state(immediate=True)
+ 
+     def update_state(self, immediate=False):
+         if "lineSpacing" not in self.controls:
+@@ -925,15 +960,18 @@ class UrbanFieldGenerator:
+         self.state["fieldType"] = self._get_field_type()
+         self.state["basisType"] = self._get_basis_type()
+         self.state["basisBlendFactor"] = safe_float(
+-            self.controls["basisBlendFactor"].get(), 0.5) if "basisBlendFactor" in self.controls and self.controls["basisBlendFactor"].winfo_exists() else 0.5
++            self.controls["basisBlendFactor"].get(), 0.35) if "basisBlendFactor" in self.controls and self.controls["basisBlendFactor"].winfo_exists() else 0.35
+         self.state["boundaryDecay"] = safe_float(
+             self.controls["boundaryDecay"].get(), 150) if "boundaryDecay" in self.controls and self.controls["boundaryDecay"].winfo_exists() else 150
+         self.state["boundaryBlendFactor"] = safe_float(
+             self.controls["boundaryBlendFactor"].get(), 0.5) if "boundaryBlendFactor" in self.controls and self.controls["boundaryBlendFactor"].winfo_exists() else 0.5
+         self.state["heightBlendFactor"] = safe_float(
+             self.controls["heightBlendFactor"].get(), 0.5) if "heightBlendFactor" in self.controls and self.controls["heightBlendFactor"].winfo_exists() else 0.5
+-        self.state["siteWidth"] = safe_float(self.controls["siteWidth"].get(), 1200)
+-        self.state["siteHeight"] = safe_float(self.controls["siteHeight"].get(), 200)
++        w = safe_float(self.controls["siteWidth"].get(), 1200)
++        h = safe_float(self.controls["siteHeight"].get(), 200)
++        self.state["siteWidth"] = w
++        self.state["siteHeight"] = h
++        self._clamp_centers()
+         self.state["tensorCenters"] = list(self.tensor_centers)
+         self.state["brushStrokes"] = [list(s) for s in self.brush_strokes]
+         try:
+@@ -942,10 +980,10 @@ class UrbanFieldGenerator:
+         except Exception:
+             self.state["streetGenMode"] = STREET_PARAM
+             self.state["twoStage"] = False
+-        self.state["perlinStrength"] = safe_float(self.controls["perlinStrength"].get(), 0.2) if "perlinStrength" in self.controls else 0
+-        self.state["laplacianSmooth"] = self.controls["laplacianSmooth"].get() if "laplacianSmooth" in self.controls else False
++        self.state["perlinStrength"] = safe_float(self.controls["perlinStrength"].get(), 0.05) if "perlinStrength" in self.controls else 0
++        self.state["laplacianSmooth"] = self.controls["laplacianSmooth"].get() if "laplacianSmooth" in self.controls else True
+         self.state["smoothIters"] = safe_int(self.controls["smoothIters"].get(), 3) if "smoothIters" in self.controls else 3
+-        self.state["lineSpacing"] = safe_float(self.controls["lineSpacing"].get(), 65)
++        self.state["lineSpacing"] = safe_float(self.controls["lineSpacing"].get(), 20)
+         self.state["posCount"] = safe_int(self.controls["posCount"].get(), 10)
+         self.state["negCount"] = safe_int(self.controls["negCount"].get(), 10)
+         self.state["spacingMode"] = self._get_spacing_mode()
+@@ -991,6 +1029,16 @@ class UrbanFieldGenerator:
+             self.canvas.bind("<Button-1>", self._on_canvas_click)
+             self.canvas.bind("<B1-Motion>", self._on_canvas_drag)
+             self.canvas.bind("<ButtonRelease-1>", self._on_canvas_release)
++            self.canvas.bind("<Button-2>", self._on_canvas_pan_start)
++            self.canvas.bind("<Button-3>", self._on_canvas_pan_start)
++            self.canvas.bind("<B2-Motion>", self._on_canvas_pan_drag)
++            self.canvas.bind("<B3-Motion>", self._on_canvas_pan_drag)
++            self.canvas.bind("<ButtonRelease-2>", self._on_canvas_pan_end)
++            self.canvas.bind("<ButtonRelease-3>", self._on_canvas_pan_end)
++            self.canvas.bind("<MouseWheel>", self._on_canvas_wheel)
++            self.canvas.bind("<Button-4>", self._on_canvas_wheel)
++            self.canvas.bind("<Button-5>", self._on_canvas_wheel)
++            self.canvas.bind("<Double-Button-1>", self._on_canvas_double_click)
+             self._canvas_custom_bound = True
+         run_mode = self._get_run_mode()
+         if run_mode == "D":
+@@ -1000,6 +1048,20 @@ class UrbanFieldGenerator:
+             for w in self._hyperstreamline_frame.winfo_children():
+                 w.destroy()
+         self.resize_canvas()
++        if not (self.draw_mode or self.brush_draw_mode or self.hyperstreamline_seed_mode or self.tensor_center_add_mode):
++            base = T["status_default"] + "\n" + T.get("status_view_hint", "")
++            w, h = self.state.get("siteWidth", 1200), self.state.get("siteHeight", 200)
++            basis = self._get_basis_type()
++            use_hyper = "streetGenMode" in self.controls and self.controls["streetGenMode"].get() == STREET_HYPER
++            two_stage = "twoStage" in self.controls and self.controls["twoStage"].get()
++            line_sp = self.state.get("lineSpacing", 20)
++            if use_hyper:
++                major_d = max(36, min(46, line_sp * 0.72)) if not two_stage else max(42, min(52, line_sp * 0.80))
++                minor_d = max(12, min(18, line_sp * 0.24)) if not two_stage else max(20, min(26, line_sp * 0.40))
++                base += f"\nmajor_d_sep={major_d} minor_d_sep={minor_d} basis={basis}"
++            if w == 1200 and h == 200 and basis == BASIS_RADIAL:
++                base += "\n" + T.get("status_narrow_radial_hint", "")
++            self.status_label.config(text=base)
+         if immediate:
+             if self._generate_after_id:
+                 self.root.after_cancel(self._generate_after_id)
+@@ -1021,15 +1083,87 @@ class UrbanFieldGenerator:
+     def resize_canvas(self):
+         w = int(self.state["siteWidth"])
+         h = int(self.state["siteHeight"])
+-        self.canvas.config(width=w + 2 * DRAW_PADDING, height=h + 2 * DRAW_PADDING)
++        target_w = w + 2 * DRAW_PADDING
++        target_h = h + 2 * DRAW_PADDING
++        if self.canvas.winfo_width() != target_w or self.canvas.winfo_height() != target_h:
++            self.canvas.config(width=target_w, height=target_h)
+ 
+     def _pad(self, x, y):
+-        """閫昏緫鍧愭爣杞敾甯冨潗鏍?""
+-        return x + DRAW_PADDING, y + DRAW_PADDING
++        """閫昏緫鍧愭爣杞敾甯冨潗鏍囷紙鍚缉鏀句笌骞崇Щ锛?""
++        cv_w = max(1, self.canvas.winfo_width())
++        cv_h = max(1, self.canvas.winfo_height())
++        cx = (x - self._view_cx) * self._view_zoom + cv_w / 2
++        cy = (y - self._view_cy) * self._view_zoom + cv_h / 2
++        return cx, cy
+ 
+     def _unpad(self, cx, cy):
+         """鐢诲竷鍧愭爣杞€昏緫鍧愭爣"""
+-        return cx - DRAW_PADDING, cy - DRAW_PADDING
++        cv_w = max(1, self.canvas.winfo_width())
++        cv_h = max(1, self.canvas.winfo_height())
++        x = (cx - cv_w / 2) / self._view_zoom + self._view_cx
++        y = (cy - cv_h / 2) / self._view_zoom + self._view_cy
++        return x, y
++
++    def _reset_view(self):
++        """閲嶇疆瑙嗗浘鍒伴粯璁ょ缉鏀句笌浣嶇疆"""
++        pw = self.state.get("siteWidth", 1200)
++        ph = self.state.get("siteHeight", 200)
++        self._view_zoom = 1.0
++        self._view_cx = pw / 2.0
++        self._view_cy = ph / 2.0
++        self._pan_start = None
++        self.generate()
++
++    def _on_canvas_wheel(self, event):
++        """榧犳爣婊氳疆缂╂斁"""
++        pw = self.state.get("siteWidth", 1200)
++        ph = self.state.get("siteHeight", 200)
++        cv_w = max(1, self.canvas.winfo_width())
++        cv_h = max(1, self.canvas.winfo_height())
++        # 榧犳爣浣嶇疆瀵瑰簲鐨勯€昏緫鍧愭爣
++        lx = (event.x - cv_w / 2) / self._view_zoom + self._view_cx
++        ly = (event.y - cv_h / 2) / self._view_zoom + self._view_cy
++        delta = event.delta
++        if hasattr(event, "num") and event.num in (4, 5):
++            delta = 120 if event.num == 4 else -120
++        factor = 1.15 if delta > 0 else 1 / 1.15
++        zoom_new = max(0.1, min(20.0, self._view_zoom * factor))
++        # 淇濇寔榧犳爣涓嬬殑閫昏緫鐐逛笉鍙?+        self._view_cx = lx - (event.x - cv_w / 2) / zoom_new
++        self._view_cy = ly - (event.y - cv_h / 2) / zoom_new
++        self._view_zoom = zoom_new
++        self._redraw_from_last()
++
++    def _on_canvas_pan_start(self, event):
++        """寮€濮嬪钩绉伙紙鍙抽敭鎴栦腑閿寜涓嬶級"""
++        self._pan_start = (event.x, event.y, self._view_cx, self._view_cy)
++
++    def _on_canvas_pan_drag(self, event):
++        """骞崇Щ鎷栧姩"""
++        if self._pan_start is None:
++            return
++        dx = event.x - self._pan_start[0]
++        dy = event.y - self._pan_start[1]
++        self._view_cx = self._pan_start[2] - dx / self._view_zoom
++        self._view_cy = self._pan_start[3] - dy / self._view_zoom
++        self._redraw_from_last()
++
++    def _on_canvas_pan_end(self, event):
++        """缁撴潫骞崇Щ"""
++        self._pan_start = None
++
++    def _on_canvas_double_click(self, event):
++        """鍙屽嚮閲嶇疆瑙嗗浘锛堥潪缂栬緫妯″紡涓嬶級"""
++        if not (self.tensor_center_add_mode or self.hyperstreamline_seed_mode or
++                self.brush_draw_mode or self.draw_mode):
++            self._reset_view()
++
++    def _redraw_from_last(self, override_centers=None):
++        """鏍规嵁涓婃缁撴灉閲嶇粯锛岀敤浜庡钩绉?缂╂斁/鎷栧姩鏃跺揩閫熷埛鏂般€俹verride_centers 鐢ㄤ簬鎷栧姩涓績鐐规椂瀹炴椂鏄剧ず"""
++        if self._last_applied_result is not None:
++            self._apply_gen_result(self._last_applied_result, override_centers=override_centers)
++        else:
++            self._show_calculating()
+ 
+     def _draw_cross_glyph(self, x, y, ux, uy, vx, vy, half_len=8, fill="#888888", width=1):
+         """鍦?(x,y) 缁樺埗鍗佸瓧鐭嚎鏂瑰悜绾圭悊锛氭部 u 鍜?v 鏂瑰悜鍚勪竴鏉＄煭绾?""
+@@ -1093,22 +1227,27 @@ class UrbanFieldGenerator:
+         """鍦ㄧ敾甯冧笂鏄剧ず璁＄畻涓彁绀?""
+         pw, ph = self.state.get("siteWidth", 1200), self.state.get("siteHeight", 200)
+         self.canvas.delete("all")
+-        self.canvas.create_rectangle(DRAW_PADDING, DRAW_PADDING, DRAW_PADDING + pw, DRAW_PADDING + ph,
+-                                     outline="#555555", width=2, dash=(4, 4))
+-        cx, cy = DRAW_PADDING + pw / 2, DRAW_PADDING + ph / 2
++        x1, y1 = self._pad(0, 0)
++        x2, y2 = self._pad(pw, ph)
++        self.canvas.create_rectangle(x1, y1, x2, y2, outline="#555555", width=2, dash=(4, 4))
++        cx, cy = self._pad(pw / 2, ph / 2)
+         self.canvas.create_text(cx, cy, text="Calculating...", fill="#888888", font=("Inter", 14))
+         self.canvas.update_idletasks()
+ 
+-    def _apply_gen_result(self, result):
+-        """鍦ㄤ富绾跨▼搴旂敤鐢熸垚缁撴灉"""
++    def _apply_gen_result(self, result, override_centers=None):
++        """鍦ㄤ富绾跨▼搴旂敤鐢熸垚缁撴灉銆俹verride_centers 鐢ㄤ簬鎷栧姩鏃惰鐩?centers 鏄剧ず"""
+         if result is None:
+             return
++        if result.get("generation_id", 0) != self._generation_id:
++            return
++        self._last_applied_result = result
+         if result.get("kind") == "error":
+             self.canvas.delete("all")
+             pw, ph = self.state.get("siteWidth", 1200), self.state.get("siteHeight", 200)
+-            self.canvas.create_rectangle(DRAW_PADDING, DRAW_PADDING, DRAW_PADDING + pw, DRAW_PADDING + ph,
+-                                         outline="#555555", width=2, dash=(4, 4))
+-            cx, cy = DRAW_PADDING + pw / 2, DRAW_PADDING + ph / 2
++            x1, y1 = self._pad(0, 0)
++            x2, y2 = self._pad(pw, ph)
++            self.canvas.create_rectangle(x1, y1, x2, y2, outline="#555555", width=2, dash=(4, 4))
++            cx, cy = self._pad(pw / 2, ph / 2)
+             self.canvas.create_text(cx, cy, text="Error: " + result.get("msg", "?"), fill="#cc6666", font=("Inter", 10))
+             return
+         kind = result.get("kind")
+@@ -1123,7 +1262,10 @@ class UrbanFieldGenerator:
+                 curve_arrays_by_curve=result["curve_arrays_by_curve"],
+             )
+         elif kind == "A":
+-            self.draw_result(mode_a_data=result["mode_a_data"])
++            data = result["mode_a_data"]
++            if override_centers is not None:
++                data = dict(data, centers=list(override_centers))
++            self.draw_result(mode_a_data=data)
+ 
+     def _poll_gen_queue(self):
+         """杞鍚庡彴鐢熸垚缁撴灉"""
+@@ -1140,18 +1282,20 @@ class UrbanFieldGenerator:
+ 
+     def _run_generate_worker(self, data):
+         """鍚庡彴绾跨▼鎵ц鐨勯噸璁＄畻閫昏緫"""
++        generation_id = data.get("generation_id", 0)
+         try:
+             result = self._do_generate(data)
++            result["generation_id"] = generation_id
+             self._gen_queue.put(result)
+         except Exception as e:
+-            self._gen_queue.put({"kind": "error", "msg": str(e)})
++            self._gen_queue.put({"kind": "error", "msg": str(e), "generation_id": generation_id})
+ 
+     def _do_generate(self, data):
+         """绾绠楅€昏緫锛屽彲鍦ㄧ嚎绋嬩腑杩愯銆俤ata 涓洪鎹曡幏鐨勫弬鏁板瓧鍏?""
+         s = data["state"]
+         basis = s.get("basisType", BASIS_GRID)
+         centers = data["centers"]
+-        blend = s.get("basisBlendFactor", 0.5)
++        blend = s.get("basisBlendFactor", 0.35)
+         boundary = data["boundary"]
+         boundary_decay = s.get("boundaryDecay", 150)
+         boundary_blend = s.get("boundaryBlendFactor", 0.5)
+@@ -1163,7 +1307,7 @@ class UrbanFieldGenerator:
+         if s.get("runMode") == "A":
+             samples = sample_tensor_field_grid(
+                 s["siteWidth"], s["siteHeight"],
+-                basis, centers, blend_factor=blend, grid_step=40,
++                basis, centers, blend_factor=blend, grid_step=60,
+                 boundary=boundary, boundary_decay=boundary_decay, boundary_blend=boundary_blend,
+                 height_gradient_fn=height_gradient_fn, height_blend=height_blend,
+                 brush_strokes=brush_strokes, brush_decay=80,
+@@ -1181,15 +1325,20 @@ class UrbanFieldGenerator:
+         )
+ 
+         if s.get("runMode") == "D":
+-            tensor_fn = _base_tensor_fn
+             if data.get("laplacian_smooth"):
+                 tensor_fn = create_smoothed_tensor_fn(
+                     _base_tensor_fn, s["siteWidth"], s["siteHeight"],
+-                    grid_step=30, smooth_iterations=data.get("smooth_iters", 2),
++                    grid_step=20, smooth_iterations=data.get("smooth_iters", 2),
++                )
++            else:
++                tensor_fn = create_tensor_grid_fn(
++                    _base_tensor_fn, s["siteWidth"], s["siteHeight"], grid_step=25,
+                 )
+             seeds = data["hyper_seeds"]
+             step_size = data.get("step_size", 2.5)
+             max_length = data.get("max_length")
++            if max_length is None or max_length <= 0:
++                max_length = max(s["siteWidth"], s["siteHeight"]) * 1.2
+             angle_stop = data.get("angle_stop", 0.3)
+             use_major = data.get("use_major", True)
+             use_minor = data.get("use_minor", False)
+@@ -1198,12 +1347,14 @@ class UrbanFieldGenerator:
+             if use_major:
+                 major_lines = integrate_hyperstreamlines_from_seeds(
+                     tensor_fn, seeds, use_major=True, step_size=step_size,
+-                    max_length=max_length, bounds=bounds, angle_threshold=angle_stop, max_steps=220)
++                    max_length=max_length, bounds=bounds, angle_threshold=angle_stop,
++                    max_steps=700, use_euler=False)
+                 lines_by_curve.extend(major_lines)
+             if use_minor:
+                 minor_lines = integrate_hyperstreamlines_from_seeds(
+                     tensor_fn, seeds, use_major=False, step_size=step_size,
+-                    max_length=max_length, bounds=bounds, angle_threshold=angle_stop, max_steps=220)
++                    max_length=max_length, bounds=bounds, angle_threshold=angle_stop,
++                    max_steps=700, use_euler=False)
+                 lines_by_curve.extend(minor_lines)
+             if not lines_by_curve:
+                 lines_by_curve = [[]]
+@@ -1216,28 +1367,39 @@ class UrbanFieldGenerator:
+         use_hyper = data.get("use_hyper", False)
+         two_stage = data.get("two_stage", False)
+ 
+-        tensor_fn = _base_tensor_fn
+-        if data.get("laplacian_smooth"):
+-            tensor_fn = create_smoothed_tensor_fn(
+-                _base_tensor_fn, s["siteWidth"], s["siteHeight"],
+-                grid_step=30, smooth_iterations=data.get("smooth_iters", 2),
+-            )
+-
+         if use_hyper:
++            if data.get("laplacian_smooth"):
++                tensor_fn = create_smoothed_tensor_fn(
++                    _base_tensor_fn, s["siteWidth"], s["siteHeight"],
++                    grid_step=20, smooth_iterations=data.get("smooth_iters", 2),
++                )
++            else:
++                tensor_fn = create_tensor_grid_fn(
++                    _base_tensor_fn, s["siteWidth"], s["siteHeight"], grid_step=25,
++                )
+             seeds = data.get("hyper_seeds") or list(centers)
+-            d_sep = line_spacing
+             angle_stop = data.get("angle_stop", 0.3)
++            step_sz = data.get("step_size", 2.0)
++            max_len = data.get("max_length")
++            if max_len is None or max_len <= 0:
++                max_len = max(s["siteWidth"], s["siteHeight"]) * 1.2
+             if two_stage:
++                major_d = max(42, min(52, line_spacing * 0.80))
++                minor_d = max(20, min(26, line_spacing * 0.40))
+                 hyper_graph, xs, ys = two_stage_street_generation(
+                     tensor_fn, s["siteWidth"], s["siteHeight"],
+-                    seed_points=seeds, major_d_sep=d_sep, minor_d_sep=d_sep * 0.6, step_size=2.5,
+-                    angle_threshold=angle_stop)
++                    seed_points=seeds, major_d_sep=major_d, minor_d_sep=minor_d, step_size=step_sz,
++                    angle_threshold=angle_stop, max_length=max_len)
+             else:
++                major_d = max(36, min(46, line_spacing * 0.72))
++                minor_d = max(12, min(18, line_spacing * 0.24))
+                 hyper_graph, xs, ys = generate_streets_from_hyperstreamlines(
+                     tensor_fn, s["siteWidth"], s["siteHeight"],
+-                    seed_points=seeds, d_sep=d_sep, step_size=2.5, angle_threshold=angle_stop)
++                    seed_points=seeds, major_d_sep=major_d, minor_d_sep=minor_d, step_size=step_sz,
++                    angle_threshold=angle_stop, max_length=max_len)
+             return {"kind": "hyper_street", "hyper_street_graph": hyper_graph}
+         else:
++            # B/C 妯″紡锛氬弬鏁板寲琛楅亾锛屾棤闇€ tensor_fn
+             lines, xs, ys = generate_streets_from_tensor_field(
+                 s["siteWidth"], s["siteHeight"],
+                 basis, centers, blend_factor=blend,
+@@ -1259,6 +1421,8 @@ class UrbanFieldGenerator:
+             self._generate_after_id = None
+         if "lineSpacing" not in self.controls:
+             return
++        self._generation_id += 1
++        current_generation_id = self._generation_id
+         s = self.state
+         basis = s.get("basisType", BASIS_GRID)
+         centers = s.get("tensorCenters", self.tensor_centers)
+@@ -1266,9 +1430,10 @@ class UrbanFieldGenerator:
+             centers = [(s["siteWidth"] / 2, s["siteHeight"] / 2)]
+         boundary = self._get_boundary()
+         height_gradient_fn = self._get_height_gradient_fn()
+-        perlin_str = safe_float(self.controls["perlinStrength"].get(), 0.2) if "perlinStrength" in self.controls else 0.2
++        perlin_str = safe_float(self.controls["perlinStrength"].get(), 0.05) if "perlinStrength" in self.controls else 0.05
+ 
+         data = {
++            "generation_id": current_generation_id,
+             "state": dict(s),
+             "centers": list(centers),
+             "boundary": boundary,
+@@ -1283,7 +1448,7 @@ class UrbanFieldGenerator:
+         }
+         if s.get("runMode") == "D":
+             data["hyper_seeds"] = self.hyperstreamline_seeds if self.hyperstreamline_seeds else list(centers)
+-            data["step_size"] = safe_float(self.controls["hyperStepSize"].get(), 2.5) if "hyperStepSize" in self.controls else 2.5
++            data["step_size"] = safe_float(self.controls["hyperStepSize"].get(), 2.0) if "hyperStepSize" in self.controls else 2.0
+             max_len = safe_float(self.controls["hyperMaxLength"].get(), 0) if "hyperMaxLength" in self.controls else 0
+             data["max_length"] = max_len if max_len > 0 else None
+             hyper_type = self.controls["hyperType"].get() if "hyperType" in self.controls else HYPERSTREAMLINE_MAJOR
+@@ -1291,6 +1456,7 @@ class UrbanFieldGenerator:
+             data["use_minor"] = hyper_type in (HYPERSTREAMLINE_MINOR, HYPERSTREAMLINE_BOTH)
+         else:
+             data["hyper_seeds"] = self.hyperstreamline_seeds if self.hyperstreamline_seeds else list(centers)
++            data["step_size"] = safe_float(self.controls["hyperStepSize"].get(), 2.0) if "hyperStepSize" in self.controls else 2.0
+ 
+         self._show_calculating()
+         self._gen_polling = True
+@@ -1300,6 +1466,7 @@ class UrbanFieldGenerator:
+ 
+     def draw_result(self, lines_by_curve=None, cross_spacings=None, curve_arrays_by_curve=None,
+                     hyperstreamline_mode=False, hyper_street_graph=None, mode_a_data=None):
++        self.canvas.delete("all")
+         s = self.state
+         cross_spacings = cross_spacings or [s["crossSpacing"]]
+         curve_arrays_by_curve = curve_arrays_by_curve or []
+@@ -1307,8 +1474,9 @@ class UrbanFieldGenerator:
+         self._export_geometry = {"polylines": [], "parcels": []}
+ 
+         pw, ph = s["siteWidth"], s["siteHeight"]
+-        self.canvas.create_rectangle(DRAW_PADDING, DRAW_PADDING, DRAW_PADDING + pw, DRAW_PADDING + ph,
+-                                     outline="#555555", width=2, dash=(4, 4))
++        x1, y1 = self._pad(0, 0)
++        x2, y2 = self._pad(pw, ph)
++        self.canvas.create_rectangle(x1, y1, x2, y2, outline="#555555", width=2, dash=(4, 4))
+         curve_colors = ["#ff6600", "#66ff00", "#0066ff", "#ff00ff", "#00ffff"]
+         perp = s.get("roadsPerpendicular", True)
+         use_hierarchy = s.get("roadHierarchy", True)
+@@ -1579,19 +1747,75 @@ class UrbanFieldGenerator:
+             status = "Draw river boundary"
+         elif self.brush_draw_mode:
+             status = "Draw brush stroke"
++        else:
++            status = status + "\n" + T.get("status_view_hint", "")
+         self.status_label.config(text=status)
+         self.update_state()
+ 
+     def _reset(self):
+-        w, h = safe_float(self.controls["siteWidth"].get(), 1200), safe_float(self.controls["siteHeight"].get(), 200)
++        """閲嶇疆鏁翠釜鍚戦噺鍦猴細娓呴櫎鎵€鏈夌偣銆佹洸绾裤€佽竟鐣屻€佺瀛愩€佽鍥剧瓑"""
++        self._generation_id += 1
++        while True:
++            try:
++                self._gen_queue.get_nowait()
++            except queue.Empty:
++                break
++        self._last_tensor_fn = None
++        self._last_hyper_seeds = None
++        self._export_geometry = {"polylines": [], "parcels": []}
++
++        w = safe_float(self.controls["siteWidth"].get(), 1200)
++        h = safe_float(self.controls["siteHeight"].get(), 200)
++        # 娓呴櫎鎵€鏈夋暟鎹?         self.tensor_centers = [(w / 2, h / 2)]
+         self.brush_strokes = []
+         self._current_brush_stroke = []
++        self.hyperstreamline_seeds = []
++        self.custom_seed_curves = []
++        self._river_mask_image = None
++        self._height_image = None
++        self._height_gradient_fn = None
++        self.editing_curve_index = -1
++        self._last_applied_result = None
++        # 閫€鍑虹粯鍒舵ā寮?+        if self.draw_mode:
++            self._exit_draw_mode()
++        if self.brush_draw_mode:
++            self.brush_draw_mode = False
++            self._current_brush_stroke = []
++            if "btnDrawBrush" in self.controls and self.controls["btnDrawBrush"].winfo_exists():
++                self.controls["btnDrawBrush"].config(text=BTN_DRAW_BRUSH, bg="#2a4a3a")
++        if self.tensor_center_add_mode:
++            self.tensor_center_add_mode = False
++            if "btnAddCenter" in self.controls and self.controls["btnAddCenter"].winfo_exists():
++                self.controls["btnAddCenter"].config(text=BTN_ADD_CENTER, bg="#2a4a3a")
++        if self.hyperstreamline_seed_mode:
++            self.hyperstreamline_seed_mode = False
++            if "btnAddSeed" in self.controls and self.controls["btnAddSeed"].winfo_exists():
++                self.controls["btnAddSeed"].config(text=BTN_ADD_SEED, bg="#2a4a3a")
++        # 閲嶇疆瑙嗗浘
++        self._view_zoom = 1.0
++        self._view_cx = w / 2.0
++        self._view_cy = h / 2.0
++        self._pan_start = None
++        # 閲嶇疆鍙傛暟
++        self.controls["streetGenMode"].set(STREET_HYPER)
++        self.controls["twoStage"].set(False)
++        self.controls["basisType"].set(BASIS_TYPE_OPTS[0])
++        self._on_basis_change()
++        self.controls["perlinStrength"].set(0.15)
++        self.controls["laplacianSmooth"].set(False)
++        self.controls["smoothIters"].set(3)
++        if "hyperStepSize" in self.controls:
++            self.controls["hyperStepSize"].set(2)
++        if "hyperAngleStop" in self.controls:
++            self.controls["hyperAngleStop"].set(0.3)
+         self.controls["lineSpacing"].set(65)
+         self.controls["posCount"].delete(0, tk.END)
+         self.controls["posCount"].insert(0, "10")
+         self.controls["negCount"].delete(0, tk.END)
+         self.controls["negCount"].insert(0, "10")
++        self.controls["crossSpacing"].set(80)
+         self.controls["noiseEnabled"].set(False)
+         if "pMinArea" in self.controls:
+             self.controls["pMinArea"].delete(0, tk.END)
+@@ -1609,7 +1833,8 @@ class UrbanFieldGenerator:
+             self.controls["parcelPerturbation"].set(False)
+         if "parcelPerturbationStr" in self.controls:
+             self.controls["parcelPerturbationStr"].set(0.02)
+-        self.update_state()
++        self.status_label.config(text=T["status_default"] + "\n" + T.get("status_view_hint", ""))
++        self.update_state(immediate=True)
+ 
+     def run(self):
+         self.root.mainloop()
+diff --git a/boundary_field.py b/boundary_field.py
+index 2cb5c49..6161516 100644
+--- a/boundary_field.py
++++ b/boundary_field.py
+@@ -87,20 +87,19 @@ def extract_boundary_from_curve(points, num_samples=120):
+ def nearest_on_boundary(x, y, boundary):
+     """
+     姹?(x,y) 鍒拌竟鐣岀殑鏈€鐭窛绂荤偣銆?-    Returns: (bx, by, tx, ty, dist) 鎴?None
++    Returns: (bx, by, tx, ty, d2) 鎴?None锛宒2 涓哄钩鏂硅窛绂?     """
+     if not boundary:
+         return None
+     best = None
+     best_d2 = 1e30
+-    n = len(boundary)
+-    for i in range(n):
++    for i in range(len(boundary)):
+         bx, by, tx, ty = boundary[i][0], boundary[i][1], boundary[i][2], boundary[i][3]
+-        # 鐐瑰埌绾挎鐨勮窛绂伙紙杩戜技涓虹偣鍒伴噰鏍风偣锛?-        d2 = (x - bx) ** 2 + (y - by) ** 2
++        dx, dy = x - bx, y - by
++        d2 = dx * dx + dy * dy
+         if d2 < best_d2:
+             best_d2 = d2
+-            best = (bx, by, tx, ty, math.sqrt(d2))
++            best = (bx, by, tx, ty, d2)
+     return best
+ 
+ 
+@@ -114,9 +113,9 @@ def boundary_tensor_at(x, y, boundary, decay=150):
+     nn = nearest_on_boundary(x, y, boundary)
+     if nn is None:
+         return None
+-    bx, by, tx, ty, dist = nn
+-    # 琛板噺鏉冮噸锛歟xp(-d^2 / decay^2)
+-    w = math.exp(-(dist * dist) / (decay * decay))
++    bx, by, tx, ty, d2 = nn
++    decay_sq = decay * decay
++    w = math.exp(-d2 / decay_sq)
+     if w < 0.01:
+         return None  # 澶繙锛屼笉璐＄尞
+     ux, uy = tx, ty
+diff --git a/geom.py b/geom.py
+index 38e7117..0f8afb0 100644
+--- a/geom.py
++++ b/geom.py
+@@ -34,8 +34,10 @@ def clip_segment_to_rect(p0, p1, xmin, ymin, xmax, ymax):
+     while True:
+         if c0 == 0 and c1 == 0:
+             a, b = (x0, y0), (x1, y1)
+-            d_a = (a[0] - orig_p0[0]) ** 2 + (a[1] - orig_p0[1]) ** 2
+-            d_b = (b[0] - orig_p0[0]) ** 2 + (b[1] - orig_p0[1]) ** 2
++            da0, da1 = a[0] - orig_p0[0], a[1] - orig_p0[1]
++            db0, db1 = b[0] - orig_p0[0], b[1] - orig_p0[1]
++            d_a = da0 * da0 + da1 * da1
++            d_b = db0 * db0 + db1 * db1
+             if d_a > d_b:
+                 a, b = b, a
+             return [a, b]
+diff --git a/hyperstreamline.py b/hyperstreamline.py
+index 58c37fe..5fcb6b4 100644
+--- a/hyperstreamline.py
++++ b/hyperstreamline.py
+@@ -2,12 +2,87 @@
+ Hyperstreamline - 浠庡紶閲忓満杩借釜涓?鍓秴娴佺嚎
+ Major: 娌?u 鏂瑰悜绉垎
+ Minor: 娌?v 鏂瑰悜绉垎
+-鍋滄鏉′欢: 杈圭晫銆佹渶澶ф鏁般€佹渶澶ч暱搴︺€佸鐐癸紙鏂瑰悜绐佸彉锛?+鍋滄鏉′欢: 杈圭晫銆佹渶澶ф鏁般€佹渶澶ч暱搴︺€佸鐐癸紙鏂瑰悜绐佸彉锛夈€佹帴杩戝凡鏈夊悓鏃忔祦绾? """
+ 
+ import math
+ 
+ 
++def point_segment_distance(pt, a, b):
++    """
++    鐐瑰埌绾挎鐨勮窛绂汇€?+    a, b: (x, y) 绾挎绔偣
++    pt: (x, y) 鐐?+    """
++    px, py = pt[0], pt[1]
++    ax, ay = a[0], a[1]
++    bx, by = b[0], b[1]
++    dx, dy = bx - ax, by - ay
++    seg_len_sq = dx * dx + dy * dy
++    if seg_len_sq < 1e-20:
++        return math.sqrt((px - ax) ** 2 + (py - ay) ** 2)
++    t = ((px - ax) * dx + (py - ay) * dy) / seg_len_sq
++    t = max(0, min(1, t))
++    proj_x = ax + t * dx
++    proj_y = ay + t * dy
++    return math.sqrt((px - proj_x) ** 2 + (py - proj_y) ** 2)
++
++
++def point_polyline_distance(pt, line):
++    """
++    鐐瑰埌鎶樼嚎鐨勬渶灏忚窛绂汇€?+    line: list of dicts with "x", "y" 鎴?list of (x,y)
++    """
++    if len(line) < 2:
++        return float("inf")
++    best = float("inf")
++    px, py = pt[0], pt[1]
++    for i in range(len(line) - 1):
++        a = (line[i]["x"], line[i]["y"]) if isinstance(line[i], dict) else line[i]
++        b = (line[i + 1]["x"], line[i + 1]["y"]) if isinstance(line[i + 1], dict) else line[i + 1]
++        d = point_segment_distance((px, py), a, b)
++        if d < best:
++            best = d
++    return best
++
++
++def too_close_to_existing(pt, existing_lines, d_sep):
++    """
++    妫€鏌ョ偣 pt 鏄惁涓?existing_lines 涓换鎰忔姌绾胯窛绂?< d_sep銆?+    existing_lines: [line1, line2, ...] 姣忔潯 line 涓?[{"x","y"}, ...]
++    """
++    if not existing_lines or d_sep <= 0:
++        return False
++    px, py = pt[0], pt[1]
++    d_sep_sq = d_sep * d_sep
++    for line in existing_lines:
++        if len(line) < 2:
++            continue
++        for i in range(len(line) - 1):
++            a = (line[i]["x"], line[i]["y"])
++            b = (line[i + 1]["x"], line[i + 1]["y"])
++            d_sq = _point_segment_distance_sq((px, py), a, b)
++            if d_sq < d_sep_sq:
++                return True
++    return False
++
++
++def _point_segment_distance_sq(pt, a, b):
++    """鐐瑰埌绾挎鐨勫钩鏂硅窛绂伙紝閬垮厤 sqrt 浠ュ姞閫?""
++    px, py = pt[0], pt[1]
++    ax, ay = a[0], a[1]
++    bx, by = b[0], b[1]
++    dx, dy = bx - ax, by - ay
++    seg_len_sq = dx * dx + dy * dy
++    if seg_len_sq < 1e-20:
++        return (px - ax) ** 2 + (py - ay) ** 2
++    t = ((px - ax) * dx + (py - ay) * dy) / seg_len_sq
++    t = max(0, min(1, t))
++    proj_x = ax + t * dx
++    proj_y = ay + t * dy
++    return (px - proj_x) ** 2 + (py - proj_y) ** 2
++
++
+ def _get_direction(tensor_fn, x, y, use_major, prev_dx, prev_dy):
+     """鑾峰彇涓庡墠涓€鏂瑰悜涓€鑷寸殑鍗曚綅鏂瑰悜銆俻rev_dx, prev_dy 涓?None 鏃跺彇姝ｅ悜銆?""
+     ux, uy, vx, vy = tensor_fn(x, y)
+@@ -45,16 +120,25 @@ def _rk4_step(tensor_fn, x, y, use_major, prev_dx, prev_dy, dt):
+     return x + (k1x + 2 * k2x + 2 * k3x + k4x) / 6, y + (k1y + 2 * k2y + 2 * k3y + k4y) / 6
+ 
+ 
++def _euler_step(tensor_fn, x, y, use_major, prev_dx, prev_dy, dt):
++    """Euler 鍗曟锛屼粎 1 娆?tensor_fn 璋冪敤锛屾瘮 RK4 蹇害 4 鍊?""
++    dx, dy = _get_direction(tensor_fn, x, y, use_major, prev_dx, prev_dy)
++    return x + dx * dt, y + dy * dt
++
++
+ def integrate_hyperstreamline(
+     tensor_fn,
+     x0, y0,
+     use_major=True,
+     bidirectional=True,
+     step_size=2.0,
+-    max_steps=500,
++    max_steps=700,
+     max_length=None,
+     bounds=None,
+-    angle_threshold=0.3,
++    angle_threshold=0.18,
++    use_euler=False,
++    existing_lines=None,
++    d_sep=40,
+ ):
+     """
+     浠?(x0, y0) 杩借釜涓€鏉¤秴娴佺嚎銆?@@ -68,6 +152,9 @@ def integrate_hyperstreamline(
+         max_length: 鍗曟柟鍚戞渶澶ч暱搴︼紝None 琛ㄧず涓嶉檺鍒?         bounds: (xmin, ymin, xmax, ymax)锛岃秴鍑哄垯鍋滄
+         angle_threshold: 鏂瑰悜绐佸彉闃堝€硷紝dot < angle_threshold 鏃跺仠姝紙0.3鈮?2掳锛屾洿瀹芥澗浠ュ欢闀挎祦绾匡級
++        use_euler: True 鐢?Euler 绉垎锛堝揩 4 鍊嶏紝绮惧害鐣ラ檷锛?+        existing_lines: 宸叉湁鍚屾棌娴佺嚎鍒楄〃锛屾柊鐐硅窛鍏?< d_sep 鏃跺仠姝?+        d_sep: 涓庡凡鏈夋祦绾跨殑鏈€灏忛棿璺濓紝灏忎簬姝ゅ€煎垯鍋滄
+ 
+     Returns:
+         list of {"x", "y", "t"} 鎸夌Н鍒嗛『搴?@@ -78,19 +165,24 @@ def integrate_hyperstreamline(
+         prev_dx, prev_dy = None, None
+         pts.append({"x": x, "y": y, "t": 0})
+         total_len = 0.0
++        dt = sign * step_size
+ 
+         for i in range(max_steps - 1):
+             dx, dy = _get_direction(tensor_fn, x, y, use_major, prev_dx, prev_dy)
+             if sign < 0:
+                 dx, dy = -dx, -dy
+-            x_new, y_new = _rk4_step(tensor_fn, x, y, use_major, prev_dx, prev_dy, sign * step_size)
++            if use_euler:
++                x_new, y_new = _euler_step(tensor_fn, x, y, use_major, prev_dx, prev_dy, dt)
++            else:
++                x_new, y_new = _rk4_step(tensor_fn, x, y, use_major, prev_dx, prev_dy, dt)
+             dx_new, dy_new = _get_direction(tensor_fn, x_new, y_new, use_major, dx, dy)
+             if sign < 0:
+                 dx_new, dy_new = -dx_new, -dy_new
+             dot = dx * dx_new + dy * dy_new
+             if dot < angle_threshold:
+                 break
+-            seg_len = math.sqrt((x_new - x) ** 2 + (y_new - y) ** 2)
++            dx, dy = x_new - x, y_new - y
++            seg_len = math.sqrt(dx * dx + dy * dy)
+             total_len += seg_len
+             if max_length is not None and total_len > max_length:
+                 break
+@@ -98,6 +190,9 @@ def integrate_hyperstreamline(
+                 xmin, ymin, xmax, ymax = bounds
+                 if x_new < xmin or x_new > xmax or y_new < ymin or y_new > ymax:
+                     break
++            local_sep = max(6.0, d_sep * 0.80)
++            if existing_lines and d_sep > 0 and too_close_to_existing((x_new, y_new), existing_lines, local_sep):
++                break
+             pts.append({"x": x_new, "y": y_new, "t": sign * (i + 1) * step_size})
+             x, y = x_new, y_new
+             prev_dx, prev_dy = dx_new, dy_new
+@@ -121,14 +216,16 @@ def integrate_hyperstreamlines_from_seeds(
+     use_major=True,
+     bidirectional=True,
+     step_size=2.0,
+-    max_steps=500,
++    max_steps=700,
+     max_length=None,
+     bounds=None,
+     angle_threshold=0.5,
++    use_euler=False,
+ ):
+     """
+     浠庡涓瀛愮偣杩借釜瓒呮祦绾裤€?     seed_points: [(x, y), ...]
++    use_euler: True 鏃剁敤 Euler 绉垎锛岀害蹇?3 鍊?     Returns: [line1, line2, ...] 姣忔潯 line 涓?[{"x","y","t"}, ...]
+     """
+     lines = []
+@@ -142,6 +239,7 @@ def integrate_hyperstreamlines_from_seeds(
+             max_length=max_length,
+             bounds=bounds,
+             angle_threshold=angle_threshold,
++            use_euler=use_euler,
+         )
+         lines.append(pts)
+     return lines
+diff --git a/i18n.py b/i18n.py
+index d75ada0..98c09ae 100644
+--- a/i18n.py
++++ b/i18n.py
+@@ -181,6 +181,8 @@ _LANG_EN = {
+         "export_dxf": "Export DXF",
+         "footer": "Non-Radial Field Generator\nUrban Morphology Study Tool",
+         "status_default": "COORD_SYSTEM: CARTESIAN\nEXPANSION_VECTOR: LINE_LOCAL_NORMAL\nSTATUS: REALTIME_CALCULATION",
++        "status_view_hint": "Scroll: zoom | Right-drag: pan | Double-click: reset view",
++        "status_narrow_radial_hint": "Narrow site + Radial: many lines get clipped. Use Blend or smaller lineSpacing for more visible lines.",
+     },
+     "RUN_MODE_OPTS": ["A - Flow Lines", "B - Street Network", "C - Parcel Blocks", "D - Hyperstreamlines"],
+     "ENGINE_OPTS": ["A. Offset", "B. Blended", "C. Scalar+Streamline"],
+@@ -325,6 +327,8 @@ _LANG_ZH = {
+         "export_dxf": "瀵煎嚭 DXF",
+         "footer": "闈炲緞鍚戝悜閲忓満鐢熸垚鍣╘n鍩庡競褰㈡€佸鐮旂┒宸ュ叿",
+         "status_default": "鍧愭爣绯? 绗涘崱灏擻n鎵╁紶鍚戦噺: 绾垮眬閮ㄦ硶鍚慭n鐘舵€? 瀹炴椂璁＄畻",
++        "status_view_hint": "婊氳疆: 缂╂斁 | 鍙抽敭鎷栧姩: 骞崇Щ | 鍙屽嚮: 閲嶇疆瑙嗗浘",
++        "status_narrow_radial_hint": "绐勫満鍦?绾緞鍚戝熀搴曚細瀵艰嚧寰堝绾胯瑁佸壀锛岃嫢鎯冲緱鍒版洿澶氬彲瑙佺嚎锛屽缓璁娇鐢?Blend 鎴栧噺灏?lineSpacing銆?,
+     },
+     "RUN_MODE_OPTS": ["A - 娴佺嚎", "B - 琛楅亾缃戠粶", "C - 鍦板潡", "D - 瓒呮祦绾?],
+     "ENGINE_OPTS": ["A. 鍋忕Щ", "B. 娣峰悎", "C. 鏍囬噺+娴佺嚎"],
+diff --git a/parcel_subdivision.py b/parcel_subdivision.py
+index 1eaa701..cdce1b4 100644
+--- a/parcel_subdivision.py
++++ b/parcel_subdivision.py
+@@ -26,7 +26,8 @@ def polygon_area(pts):
+ 
+ 
+ def segment_length(p0, p1):
+-    return math.sqrt((p1[0] - p0[0]) ** 2 + (p1[1] - p0[1]) ** 2)
++    dx, dy = p1[0] - p0[0], p1[1] - p0[1]
++    return math.sqrt(dx * dx + dy * dy)
+ 
+ 
+ def polygon_frontage(pts):
+diff --git a/street_from_hyperstreamlines.py b/street_from_hyperstreamlines.py
+index 1a6ec40..d2fb880 100644
+--- a/street_from_hyperstreamlines.py
++++ b/street_from_hyperstreamlines.py
+@@ -38,13 +38,16 @@ def _line_to_segments(line):
+     return segs
+ 
+ 
+-def _find_intersections(major_lines, minor_lines):
+-    """涓?鍓秴娴佺嚎浜ょ偣"""
++def _lines_to_segments_cache(lines):
++    """鎵归噺缂撳瓨绾挎锛岄伩鍏嶉噸澶嶈绠?""
++    return [_line_to_segments(ln) for ln in lines]
++
++
++def _find_intersections(major_segs, minor_segs):
++    """涓?鍓秴娴佺嚎浜ょ偣锛屾帴鏀堕璁＄畻鐨?segments"""
+     intersections = []
+-    for mj_line in major_lines:
+-        mj_segs = _line_to_segments(mj_line)
+-        for mn_line in minor_lines:
+-            mn_segs = _line_to_segments(mn_line)
++    for mj_segs in major_segs:
++        for mn_segs in minor_segs:
+             for s1 in mj_segs:
+                 for s2 in mn_segs:
+                     pt = _intersect_segments(s1[0], s1[1], s2[0], s2[1])
+@@ -53,26 +56,60 @@ def _find_intersections(major_lines, minor_lines):
+     return intersections
+ 
+ 
++def _polyline_length(line):
++    """鎶樼嚎鎬婚暱搴?""
++    if len(line) < 2:
++        return 0.0
++    total = 0.0
++    for i in range(len(line) - 1):
++        a = (line[i]["x"], line[i]["y"])
++        b = (line[i + 1]["x"], line[i + 1]["y"])
++        dx = b[0] - a[0]
++        dy = b[1] - a[1]
++        total += math.sqrt(dx * dx + dy * dy)
++    return total
++
++
+ def _expand_seeds_for_coverage(site_width, site_height, seed_points, min_seeds=6):
+     """
+-    褰撶瀛愮偣杩囧皯锛?-2涓級鏃讹紝鍦ㄥ満鍦颁笂鐢熸垚鍧囧寑鍒嗗竷鐨勫绉嶅瓙锛岄伩鍏嶈閬撳洟鎴愪竴鍥€?-    鍗曚腑蹇冩垨鍙屼腑蹇冩椂锛岃秴娴佺嚎鏄撴眹鑱氾紝闇€澶氱瀛愬垎鏁ｈ鐩栥€?-    闄愬埗绉嶅瓙鏁颁互鍔犻€熻绠椼€侀伩鍏嶅崱姝汇€?+    Keep original seeds. If there are too few, add extra coverage seeds
++    instead of replacing the originals.
+     """
+-    if seed_points and len(seed_points) >= min_seeds:
+-        return seed_points
+-    # 鍦ㄥ満鍦颁笂鐢熸垚 2x3 鎴?3x2 缃戞牸绉嶅瓙锛屽甫杈硅窛锛岄檺鍒舵€绘暟
++    seeds = list(seed_points) if seed_points else []
++
++    if len(seeds) >= min_seeds:
++        return seeds
++
+     margin = 0.12
+-    n = 3  # 鏈€澶?3x3=9 涓紝閫氬父 2x3=6 涓?-    seeds = []
++    n = 3
++    extra = []
++
+     for i in range(n):
+         for j in range(n):
+-            t = (i + 1) / (n + 1)
+-            s = (j + 1) / (n + 1)
+-            x = margin * site_width + (1 - 2 * margin) * site_width * t
+-            y = margin * site_height + (1 - 2 * margin) * site_height * s
+-            seeds.append((x, y))
+-    return seeds
++            tx = (i + 1) / (n + 1)
++            ty = (j + 1) / (n + 1)
++            x = margin * site_width + (1.0 - 2.0 * margin) * site_width * tx
++            y = margin * site_height + (1.0 - 2.0 * margin) * site_height * ty
++            extra.append((x, y))
++
++    merged = seeds + extra
++
++    # simple dedupe: avoid adding points that are almost the same
++    out = []
++    min_dist2 = 25.0  # 5 px radius
++    for p in merged:
++        px, py = p
++        too_close = False
++        for qx, qy in out:
++            dx = px - qx
++            dy = py - qy
++            if dx * dx + dy * dy < min_dist2:
++                too_close = True
++                break
++        if not too_close:
++            out.append((px, py))
++
++    return out
+ 
+ 
+ def _merge_near_points(points, tol=2.0):
+@@ -99,19 +136,22 @@ def _merge_near_points(points, tol=2.0):
+ def interleaved_hyperstreamlines(
+     tensor_fn,
+     seed_points,
+-    d_sep=65,
++    major_d_sep=65,
++    minor_d_sep=35,
+     step_size=2.0,
+-    max_steps=220,
++    max_steps=700,
+     max_length=None,
+     bounds=None,
+     angle_threshold=0.3,
++    use_euler=False,
+ ):
+     """
+     璁烘枃 6.1 浜ゆ浛杩借釜锛氫富鈫掑壇鈫掍富鈫掑壇...锛屽噺灏戞偓绌鸿竟銆?-    浠庣瀛愬紑濮嬶紝娌夸富鏂瑰悜杩借釜涓€鏉★紝鍦?d_sep 澶勫彇鏂扮瀛愭部鍓柟鍚戣拷韪紝濡傛浜ゆ浛銆?+    major 涓?minor 浣跨敤涓嶅悓 d_sep锛歮ajor 鏇寸枏锛宮inor 鏇村瘑銆?+    娌?major line 鐢?major_d_sep 娣诲姞绉嶅瓙锛屾部 minor line 鐢?minor_d_sep 娣诲姞绉嶅瓙銆?     Returns: (major_lines, minor_lines)
+     """
+-    def _trace_one(x0, y0, use_major):
++    def _trace_one(x0, y0, use_major, existing, d_sep):
+         pts = integrate_hyperstreamline(
+             tensor_fn, x0, y0,
+             use_major=use_major,
+@@ -121,6 +161,9 @@ def interleaved_hyperstreamlines(
+             max_length=max_length,
+             bounds=bounds,
+             angle_threshold=angle_threshold,
++            use_euler=use_euler,
++            existing_lines=existing,
++            d_sep=d_sep,
+         )
+         return pts
+ 
+@@ -132,7 +175,8 @@ def interleaved_hyperstreamlines(
+         return (round(x / 2), round(y / 2))
+ 
+     queue = [(x, y, True) for x, y in seed_points]
+-    max_total = 80  # 闄愬埗鎬昏秴娴佺嚎鏁伴噺锛岄伩鍏嶅崱姝?+    max_total = 110  # 闄愬埗鎬昏秴娴佺嚎鏁伴噺锛岄伩鍏嶅崱姝?+    min_line_len = max(12, step_size * 4)
+     while queue and (len(major_lines) + len(minor_lines)) < max_total:
+         x0, y0, do_major = queue.pop(0)
+         key = _seed_key(x0, y0)
+@@ -140,18 +184,23 @@ def interleaved_hyperstreamlines(
+             continue
+         used_seeds.add(key)
+ 
+-        line = _trace_one(x0, y0, do_major)
++        d_sep = major_d_sep if do_major else minor_d_sep
++        existing = major_lines if do_major else minor_lines
++        line = _trace_one(x0, y0, do_major, existing, d_sep)
+         if len(line) < 2:
+             continue
++        if _polyline_length(line) < min_line_len:
++            continue
+ 
+         if do_major:
+             major_lines.append(line)
+         else:
+             minor_lines.append(line)
+ 
+-        # 娌胯秴娴佺嚎姣?d_sep 璺濈娣诲姞鏂扮瀛愶紙璁烘枃锛氫氦鏇胯拷韪級
++        # 娌胯秴娴佺嚎娣诲姞绉嶅瓙锛歮ajor 鐢?major_d_sep锛宮inor 鐢?minor_d_sep
++        seed_spacing = max(10.0, d_sep * 0.85)
+         total = 0
+-        next_seed_dist = d_sep
++        next_seed_dist = seed_spacing
+         for i in range(len(line) - 1):
+             dx = line[i + 1]["x"] - line[i]["x"]
+             dy = line[i + 1]["y"] - line[i]["y"]
+@@ -160,8 +209,9 @@ def interleaved_hyperstreamlines(
+                 t = (next_seed_dist - total) / seg_len if seg_len > 0 else 0
+                 nx = line[i]["x"] + t * dx
+                 ny = line[i]["y"] + t * dy
+-                queue.append((nx, ny, not do_major))
+-                next_seed_dist += d_sep
++                if len(queue) <= 300:
++                    queue.append((nx, ny, not do_major))
++                next_seed_dist += seed_spacing
+             total += seg_len
+ 
+     return major_lines, minor_lines
+@@ -173,13 +223,140 @@ def _find_nearest_idx(pt, vertices, tol=5):
+     best_d2 = tol * tol
+     ptx, pty = pt[0], pt[1]
+     for i, v in enumerate(vertices):
+-        d2 = (ptx - v[0]) ** 2 + (pty - v[1]) ** 2
++        dx, dy = ptx - v[0], pty - v[1]
++        d2 = dx * dx + dy * dy
+         if d2 < best_d2:
+             best_d2 = d2
+             best = i
+     return best
+ 
+ 
++def project_point_onto_polyline_segment(pt, line):
++    """
++    灏嗙偣 pt 鎶曞奖鍒版姌绾?line 鐨勬渶杩戠嚎娈典笂銆?+    杩斿洖 (segment_index, t_param, projected_x, projected_y) 鎴?None銆?+    t_param: 娌胯绾挎鐨勫弬鏁?[0,1]锛?=璧风偣锛?=缁堢偣
++    """
++    if len(line) < 2:
++        return None
++    best_seg = -1
++    best_t = 0.0
++    best_pt = None
++    best_d2 = float("inf")
++    px, py = pt[0], pt[1]
++    for i in range(len(line) - 1):
++        a = (line[i]["x"], line[i]["y"])
++        b = (line[i + 1]["x"], line[i + 1]["y"])
++        ax, ay = a[0], a[1]
++        bx, by = b[0], b[1]
++        dx, dy = bx - ax, by - ay
++        seg_len_sq = dx * dx + dy * dy
++        if seg_len_sq < 1e-20:
++            t = 0.0
++            proj = a
++        else:
++            t = ((px - ax) * dx + (py - ay) * dy) / seg_len_sq
++            t = max(0, min(1, t))
++            proj = (ax + t * dx, ay + t * dy)
++        d2 = (px - proj[0]) ** 2 + (py - proj[1]) ** 2
++        if d2 < best_d2:
++            best_d2 = d2
++            best_seg = i
++            best_t = t
++            best_pt = proj
++    if best_pt is None:
++        return None
++    return (best_seg, best_t, best_pt[0], best_pt[1])
++
++
++def split_polyline_at_intersections(line, intersection_points, tol=1e-6):
++    """
++    鍦ㄦ姌绾跨殑浜ょ偣澶勫垏鍒嗘姌绾裤€?+    瀵规瘡涓?intersection锛屾姇褰卞埌鎶樼嚎涓婂緱鍒版彃鍏ヤ綅缃€?+    杩斿洖: [(pts, start_node, end_node), ...]
++    姣忎釜鍏冪礌鏄竴鏉″垏鍒嗗悗鐨勬锛堝畬鏁磋矾寰勭偣鍒楄〃锛夊強鍏惰捣姝㈣妭鐐瑰潗鏍囥€?+    """
++    if len(line) < 2:
++        return []
++    line_pts = [(p["x"], p["y"]) for p in line]
++    inserts = []
++    for pt in intersection_points:
++        proj = project_point_onto_polyline_segment(pt, line)
++        if proj is None:
++            continue
++        seg_idx, t_param, px, py = proj
++        inserts.append((seg_idx, t_param, (px, py)))
++    inserts.sort(key=lambda x: (x[0], x[1]))
++    seen = set()
++    unique_inserts = []
++    for seg_idx, t_param, pt in inserts:
++        key = (round(pt[0] / tol) * tol, round(pt[1] / tol) * tol)
++        if key not in seen:
++            seen.add(key)
++            unique_inserts.append((seg_idx, t_param, pt))
++    if not unique_inserts:
++        return [([line_pts[0], line_pts[-1]], line_pts[0], line_pts[-1])]
++    segments = []
++    cur_seg_idx = 0
++    cur_pt = line_pts[0]
++    for seg_idx, t_param, ins_pt in unique_inserts:
++        seg_pts = [cur_pt]
++        for i in range(cur_seg_idx, seg_idx):
++            seg_pts.append(line_pts[i + 1])
++        seg_pts.append(ins_pt)
++        segments.append((seg_pts, cur_pt, ins_pt))
++        cur_pt = ins_pt
++        cur_seg_idx = seg_idx
++    seg_pts = [cur_pt]
++    for i in range(cur_seg_idx, len(line_pts) - 1):
++        seg_pts.append(line_pts[i + 1])
++    segments.append((seg_pts, cur_pt, line_pts[-1]))
++    return segments
++
++
++def cluster_points(points, tol=2.0):
++    """
++    鍚堝苟璺濈灏忎簬 tol 鐨勭偣锛岃繑鍥炲幓閲嶅悗鐨勭偣鍒楄〃銆?+    姣忎釜绨囩敤鍏惰川蹇冭〃绀恒€?+    """
++    if not points:
++        return []
++    tol_sq = tol * tol
++    n = len(points)
++    parent = list(range(n))
++
++    def find(x):
++        if parent[x] != x:
++            parent[x] = find(parent[x])
++        return parent[x]
++
++    def union(a, b):
++        pa, pb = find(a), find(b)
++        if pa != pb:
++            parent[pa] = pb
++
++    for i in range(n):
++        for j in range(i + 1, n):
++            dx = points[i][0] - points[j][0]
++            dy = points[i][1] - points[j][1]
++            if dx * dx + dy * dy < tol_sq:
++                union(i, j)
++
++    clusters = {}
++    for i in range(n):
++        r = find(i)
++        if r not in clusters:
++            clusters[r] = []
++        clusters[r].append(points[i])
++
++    out = []
++    for pts in clusters.values():
++        cx = sum(p[0] for p in pts) / len(pts)
++        cy = sum(p[1] for p in pts) / len(pts)
++        out.append((cx, cy))
++    return out
++
++
+ def hyperstreamlines_to_street_graph(
+     major_lines,
+     minor_lines,
+@@ -187,59 +364,52 @@ def hyperstreamlines_to_street_graph(
+ ):
+     """
+     浠庝富/鍓秴娴佺嚎鏋勫缓琛楅亾鍥?G=(V,E)銆?+    鑺傜偣浠呮潵鑷細浜ょ偣 + 鍒囧垎鍚庣殑鐪熷疄绔偣銆?+    杈逛粎鏉ヨ嚜锛氱浉閭昏妭鐐逛箣闂寸殑闀挎锛坕ntersection-to-intersection 鎴?endpoint-to-intersection锛夈€?     Returns: {"vertices": [(x,y),...], "edges": [(i,j),...], "edge_pts": [[(x,y),...],...]}
+     """
+-    from geom import clip_segment_to_rect
+-
+     if bounds:
+         xmin, ymin, xmax, ymax = bounds
+     else:
+         xmin = ymin = 0
+         xmax = ymax = 1e9
+ 
+-    # 鏀堕泦浜ょ偣
++    major_segs = _lines_to_segments_cache(major_lines)
++    minor_segs = _lines_to_segments_cache(minor_lines)
+     intersections = []
+-    for mj in major_lines:
+-        mj_segs = _line_to_segments(mj)
+-        for mn in minor_lines:
+-            mn_segs = _line_to_segments(mn)
+-            for s1 in mj_segs:
+-                for s2 in mn_segs:
+-                    pt = _intersect_segments(s1[0], s1[1], s2[0], s2[1])
+-                    if pt and xmin <= pt[0] <= xmax and ymin <= pt[1] <= ymax:
+-                        intersections.append(pt)
++    for pt in _find_intersections(major_segs, minor_segs):
++        if xmin <= pt[0] <= xmax and ymin <= pt[1] <= ymax:
++            intersections.append(pt)
+ 
+-    # 鏀堕泦鎵€鏈夌嚎娈电鐐?-    all_pts = list(intersections)
+-    for line in major_lines + minor_lines:
+-        for p in line:
+-            pt = (p["x"], p["y"])
+-            if xmin <= pt[0] <= xmax and ymin <= pt[1] <= ymax:
+-                all_pts.append(pt)
++    all_nodes = list(intersections)
++    all_segments = []
+ 
+-    vertices = _merge_near_points(all_pts, tol=3.0)
++    for line in major_lines + minor_lines:
++        if len(line) < 2:
++            continue
++        segs = split_polyline_at_intersections(line, intersections)
++        for pts, start_node, end_node in segs:
++            if len(pts) < 2:
++                continue
++            all_nodes.append(start_node)
++            all_nodes.append(end_node)
++            all_segments.append((pts, start_node, end_node))
++
++    vertices = cluster_points(all_nodes, tol=3.0)
+     if not vertices:
+         return {"vertices": [], "edges": [], "edge_pts": []}
+ 
+     edges = []
+     edge_pts = []
+-
+-    for line in major_lines + minor_lines:
+-        for i in range(len(line) - 1):
+-            p1 = (line[i]["x"], line[i]["y"])
+-            p2 = (line[i + 1]["x"], line[i + 1]["y"])
+-            clipped = clip_segment_to_rect(p1, p2, xmin, ymin, xmax, ymax)
+-            if clipped and len(clipped) == 2:
+-                a, b = clipped[0], clipped[1]
+-                d = math.sqrt((b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2)
+-                if d > 2:
+-                    ia = _find_nearest_idx(a, vertices, 8)
+-                    ib = _find_nearest_idx(b, vertices, 8)
+-                    if ia >= 0 and ib >= 0 and ia != ib:
+-                        edges.append((ia, ib))
+-                        edge_pts.append([a, b])
+-                    else:
+-                        edge_pts.append([a, b])
++    for pts, start_node, end_node in all_segments:
++        ia = _find_nearest_idx(start_node, vertices, 8)
++        ib = _find_nearest_idx(end_node, vertices, 8)
++        if ia >= 0 and ib >= 0 and ia != ib:
++            dx = end_node[0] - start_node[0]
++            dy = end_node[1] - start_node[1]
++            if dx * dx + dy * dy > 4:
++                edges.append((ia, ib))
++                edge_pts.append(pts)
+ 
+     return {"vertices": vertices, "edges": edges, "edge_pts": edge_pts}
+ 
+@@ -249,13 +419,16 @@ def generate_streets_from_hyperstreamlines(
+     site_width,
+     site_height,
+     seed_points=None,
+-    d_sep=65,
++    major_d_sep=60,
++    minor_d_sep=14,
+     step_size=2.0,
+     max_length=None,
+     angle_threshold=0.3,
++    use_euler=False,
+ ):
+     """
+     璁烘枃寮忚閬撶敓鎴愶細瓒呮祦绾夸氦鏇胯拷韪?鈫?浜ょ偣鍥俱€?+    major_d_sep 涓?minor_d_sep 鍒嗙锛歮inor 鏇村瘑锛岀敓鎴愭洿澶?minor 绾裤€?     姝ラ1锛氳拷韪?major_lines / minor_lines
+     姝ラ2锛氭牴鎹?major/minor 浜ょ偣鏋勫缓 street graph
+     Returns: (graph, xs, ys) 鍏朵腑 graph = {"vertices", "edges", "edge_pts"}
+@@ -268,11 +441,13 @@ def generate_streets_from_hyperstreamlines(
+     # 姝ラ1锛氳拷韪富/鍓秴娴佺嚎
+     major_lines, minor_lines = interleaved_hyperstreamlines(
+         tensor_fn, seed_points,
+-        d_sep=d_sep,
++        major_d_sep=major_d_sep,
++        minor_d_sep=minor_d_sep,
+         step_size=step_size,
+         max_length=max_length,
+         bounds=bounds,
+         angle_threshold=angle_threshold,
++        use_euler=use_euler,
+     )
+ 
+     # 姝ラ2锛氭牴鎹?major/minor 浜ょ偣鏋勫缓 street graph
+@@ -286,42 +461,160 @@ def generate_streets_from_hyperstreamlines(
+ def partition_by_major_roads(major_lines, site_width, site_height):
+     """
+     璁烘枃 6.2锛氫富璺皢鍖哄煙鍒掑垎鎴愬瓙鍖哄煙锛岀敤浜庢璺敓鎴愩€?+    鍙栨渶闀跨殑 2~4 鏉?major lines锛屾寜鍏剁┖闂村垎甯冪敓鎴愯嫢骞?bbox region銆?     major_lines: 涓昏秴娴佺嚎鍒楄〃
+-    Returns: list of (polygon, center) 姣忎釜瀛愬尯鍩熺殑杩戜技澶氳竟褰㈠拰涓績
++    Returns: list of (polygon, center) 姣忎釜瀛愬尯鍩熺殑 bbox 澶氳竟褰㈠拰涓績
+     """
+-    # 绠€鍖栵細鐢ㄤ富璺綉鏍煎垝鍒嗭紝杩斿洖缃戞牸鍗曞厓
+-    # 瀹屾暣瀹炵幇闇€瑕佸杈瑰舰瑁佸壀锛岃繖閲岃繑鍥炴暣涓満鍦颁綔涓哄崟鍖哄煙
+-    return [([(0, 0), (site_width, 0), (site_width, site_height), (0, site_height)],
+-             (site_width / 2, site_height / 2))]
++    if not major_lines:
++        return [([(0, 0), (site_width, 0), (site_width, site_height), (0, site_height)],
++                 (site_width / 2, site_height / 2))]
++    sorted_lines = sorted(major_lines, key=lambda ln: sum(
++        math.sqrt((ln[i+1]["x"]-ln[i]["x"])**2 + (ln[i+1]["y"]-ln[i]["y"])**2)
++        for i in range(len(ln)-1)), reverse=True)
++    n = min(4, max(2, len(sorted_lines)))
++    top_lines = sorted_lines[:n]
++    centroids = []
++    for ln in top_lines:
++        cx = sum(p["x"] for p in ln) / len(ln)
++        cy = sum(p["y"] for p in ln) / len(ln)
++        centroids.append((cx, cy))
++    dominant_x = site_width >= site_height
++    sort_coord = 0 if dominant_x else 1
++    site_dim = site_width if dominant_x else site_height
++    ordered = sorted(range(len(centroids)), key=lambda i: centroids[i][sort_coord])
++    boundaries = [0.0]
++    for i in ordered:
++        boundaries.append(centroids[i][sort_coord])
++    boundaries.append(float(site_dim))
++    boundaries = sorted(set(boundaries))
++    regions = []
++    for i in range(len(boundaries) - 1):
++        lo, hi = boundaries[i], boundaries[i + 1]
++        if hi - lo < 20:
++            continue
++        mid = (lo + hi) / 2
++        if dominant_x:
++            xmin, xmax = lo, hi
++            ymin, ymax = 0, site_height
++        else:
++            xmin, xmax = 0, site_width
++            ymin, ymax = lo, hi
++        poly = [(xmin, ymin), (xmax, ymin), (xmax, ymax), (xmin, ymax)]
++        center = ((xmin + xmax) / 2, (ymin + ymax) / 2)
++        regions.append((poly, center))
++    if not regions:
++        return [([(0, 0), (site_width, 0), (site_width, site_height), (0, site_height)],
++                 (site_width / 2, site_height / 2))]
++    return regions
++
++
++def _trace_minor_lines_in_region(
++    tensor_fn,
++    region_bbox,
++    d_sep,
++    step_size,
++    angle_threshold,
++    use_euler=False,
++    max_steps=700,
++    max_length=None,
++):
++    """
++    鍦?region bbox 鍐呬粎杩借釜 minor 瓒呮祦绾裤€?+    region_bbox: (xmin, ymin, xmax, ymax)
++    姣忔鑻ヨ窇鍑?bbox 鍒欏仠姝紙鐢?integrate_hyperstreamline bounds 瀹炵幇锛夈€?+    Returns: list of minor lines
++    """
++    xmin, ymin, xmax, ymax = region_bbox
++    w, h = xmax - xmin, ymax - ymin
++    cx = (xmin + xmax) / 2
++    cy = (ymin + ymax) / 2
++    seeds = _expand_seeds_for_coverage(w, h, [(cx, cy)], min_seeds=4)
++    seeds = [(xmin + x, ymin + y) for x, y in seeds]
++    seeds = [(x, y) for x, y in seeds if xmin <= x <= xmax and ymin <= y <= ymax]
++    if not seeds:
++        seeds = [(cx, cy)]
++    bounds = region_bbox
++    minor_lines = []
++    used_seeds = set()
++
++    def _seed_key(x, y):
++        return (round(x / 2), round(y / 2))
++
++    queue = [(x, y) for x, y in seeds]
++    max_total = 55
++    min_line_len = max(12, step_size * 4)
++    while queue and len(minor_lines) < max_total:
++        x0, y0 = queue.pop(0)
++        key = _seed_key(x0, y0)
++        if key in used_seeds:
++            continue
++        used_seeds.add(key)
++        if not (xmin <= x0 <= xmax and ymin <= y0 <= ymax):
++            continue
++        pts = integrate_hyperstreamline(
++            tensor_fn, x0, y0,
++            use_major=False,
++            bidirectional=True,
++            step_size=step_size,
++            max_steps=max_steps,
++            max_length=max_length,
++            bounds=bounds,
++            angle_threshold=angle_threshold,
++            use_euler=use_euler,
++            existing_lines=minor_lines,
++            d_sep=d_sep,
++        )
++        if len(pts) < 2:
++            continue
++        if _polyline_length(pts) < min_line_len:
++            continue
++        minor_lines.append(pts)
++        seed_spacing = max(10.0, d_sep * 0.85)
++        total = 0
++        next_seed_dist = seed_spacing
++        for i in range(len(pts) - 1):
++            dx = pts[i + 1]["x"] - pts[i]["x"]
++            dy = pts[i + 1]["y"] - pts[i]["y"]
++            seg_len = math.sqrt(dx * dx + dy * dy)
++            while total + seg_len >= next_seed_dist:
++                t = (next_seed_dist - total) / seg_len if seg_len > 0 else 0
++                nx = pts[i]["x"] + t * dx
++                ny = pts[i]["y"] + t * dy
++                if xmin <= nx <= xmax and ymin <= ny <= ymax and len(queue) <= 300:
++                    queue.append((nx, ny))
++                next_seed_dist += seed_spacing
++            total += seg_len
++    return minor_lines
+ 
+ 
+ def generate_minor_roads_in_region(
+     tensor_fn,
+     region_polygon,
+     region_center,
+-    d_sep=40,
++    d_sep=45,
+     step_size=2.0,
++    max_length=None,
+     bounds=None,
+     angle_threshold=0.3,
+ ):
+     """
+-    鍦ㄥ瓙鍖哄煙鍐呯敓鎴愭璺€傚彲鐢ㄤ笉鍚岀殑寮犻噺鍦猴紙灞€閮級銆?+    鍦ㄥ瓙鍖哄煙鍐呯敓鎴愭璺€備粎杩借釜 minor 瓒呮祦绾匡紝seeds 鍦?region 鍐咃紝tracing 鍑?bbox 鍗冲仠銆?     """
+-    if bounds:
+-        xmin, ymin, xmax, ymax = bounds
+-        w, h = xmax - xmin, ymax - ymin
+-        seeds = _expand_seeds_for_coverage(w, h, [region_center], min_seeds=4)
+-        seeds = [(xmin + x, ymin + y) for x, y in seeds]
+-    else:
+-        seeds = [region_center]
+-    major_lines, minor_lines = interleaved_hyperstreamlines(
+-        tensor_fn, seeds,
++    if not region_polygon or len(region_polygon) < 3:
++        return []
++    xs = [p[0] for p in region_polygon]
++    ys = [p[1] for p in region_polygon]
++    xmin, xmax = min(xs), max(xs)
++    ymin, ymax = min(ys), max(ys)
++    region_bbox = (xmin, ymin, xmax, ymax)
++    return _trace_minor_lines_in_region(
++        tensor_fn,
++        region_bbox,
+         d_sep=d_sep,
+         step_size=step_size,
+-        bounds=bounds,
++        max_length=max_length,
+         angle_threshold=angle_threshold,
+     )
+-    return major_lines + minor_lines
+ 
+ 
+ def two_stage_street_generation(
+@@ -330,14 +623,18 @@ def two_stage_street_generation(
+     site_height,
+     seed_points=None,
+     major_d_sep=65,
+-    minor_d_sep=40,
++    minor_d_sep=35,
+     step_size=2.0,
++    max_length=None,
+     angle_threshold=0.3,
++    use_euler=False,
+ ):
+     """
+     璁烘枃 6.1+6.2 浜岄樁娈碉細涓昏矾 鈫?鍒嗗尯 鈫?娆¤矾銆?-    姝ラ1锛氳拷韪?major_lines锛屽啀鍦ㄥ瓙鍖哄煙杩借釜 minor_lines
+-    姝ラ2锛氭牴鎹?major/minor 浜ょ偣鏋勫缓 street graph
++    姝ラ1锛氳拷韪?major_lines
++    姝ラ2锛歱artition_by_major_roads 寰楀埌鑻ュ共 bbox region
++    姝ラ3锛氬姣忎釜 region 鍗曠嫭鐢熸垚 minor_lines锛坰eeds 鍦?region 鍐咃紝tracing 鍑?bbox 鍗冲仠锛?+    姝ラ4锛氬悎骞?major + all region minor锛屾瀯寤?street graph
+     Returns: (graph, xs, ys) 鍏朵腑 graph = {"vertices", "edges", "edge_pts"}
+     """
+     bounds = (0, 0, site_width, site_height)
+@@ -348,26 +645,32 @@ def two_stage_street_generation(
+     # 姝ラ1锛氳拷韪富璺?     major_lines, _ = interleaved_hyperstreamlines(
+         tensor_fn, seed_points,
+-        d_sep=major_d_sep,
++        major_d_sep=major_d_sep,
++        minor_d_sep=minor_d_sep,
+         step_size=step_size,
++        max_length=max_length,
+         bounds=bounds,
+         angle_threshold=angle_threshold,
++        use_euler=use_euler,
+     )
+ 
+-    # 姝ラ1锛氬湪瀛愬尯鍩熻拷韪璺?+    # 姝ラ2锛氬垎鍖?     regions = partition_by_major_roads(major_lines, site_width, site_height)
++
++    # 姝ラ3锛氭瘡涓?region 鍗曠嫭鐢熸垚 minor
+     minor_lines = []
+     for poly, center in regions:
+         lines = generate_minor_roads_in_region(
+             tensor_fn, poly, center,
+             d_sep=minor_d_sep,
+             step_size=step_size,
++            max_length=max_length,
+             bounds=bounds,
+             angle_threshold=angle_threshold,
+         )
+         minor_lines.extend(lines)
+ 
+-    # 姝ラ2锛氭牴鎹?major/minor 浜ょ偣鏋勫缓 street graph
++    # 姝ラ4锛氬悎骞?major + minor锛屾瀯寤?graph
+     graph = hyperstreamlines_to_street_graph(major_lines, minor_lines, bounds=bounds)
+ 
+     return graph, [site_width / 2], [site_height / 2]
+diff --git a/street_network.py b/street_network.py
+index 158bb84..e0d2dbf 100644
+--- a/street_network.py
++++ b/street_network.py
+@@ -25,9 +25,12 @@ def curvature_at_index(xs, ys, i):
+     x1, y1 = xs[i1], ys[i1]
+     x2, y2 = xs[i2], ys[i2]
+     cross = (x1 - x0) * (y2 - y1) - (y1 - y0) * (x2 - x1)
+-    L1 = math.sqrt((x1 - x0) ** 2 + (y1 - y0) ** 2) or 1e-10
+-    L2 = math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2) or 1e-10
+-    L3 = math.sqrt((x2 - x0) ** 2 + (y2 - y0) ** 2) or 1e-10
++    dx1, dy1 = x1 - x0, y1 - y0
++    dx2, dy2 = x2 - x1, y2 - y1
++    dx3, dy3 = x2 - x0, y2 - y0
++    L1 = math.sqrt(dx1 * dx1 + dy1 * dy1) or 1e-10
++    L2 = math.sqrt(dx2 * dx2 + dy2 * dy2) or 1e-10
++    L3 = math.sqrt(dx3 * dx3 + dy3 * dy3) or 1e-10
+     k = 2 * abs(cross) / (L1 * L2 * L3)
+     return min(k * 500, 2.0)  # 褰掍竴鍖栧埌鍚堢悊鑼冨洿
+ 
+@@ -36,6 +39,8 @@ def curvature_along_curve(xs, ys):
+     """娌挎洸绾块噰鏍锋洸鐜囷紝杩斿洖涓?xs 鍚岄暱鐨勫垪琛?""
+     n = len(xs)
+     curv = [0.0] * n
++    if n <= 1:
++        return curv
+     for i in range(1, n - 1):
+         curv[i] = curvature_at_index(xs, ys, i)
+     curv[0] = curv[1]
+@@ -47,7 +52,8 @@ def attractor_influence(x, y, center_x, center_y, sigma):
+     """鍚稿紩瀛愬奖鍝嶏細瓒婅繎涓績鍊艰秺楂橈紝0~1"""
+     if sigma <= 0:
+         return 0.0
+-    d2 = (x - center_x) ** 2 + (y - center_y) ** 2
++    dx, dy = x - center_x, y - center_y
++    d2 = dx * dx + dy * dy
+     return math.exp(-d2 / (2 * sigma * sigma))
+ 
+ 
+@@ -86,7 +92,7 @@ def adaptive_cross_t_positions(
+     鏍规嵁鏇茬巼銆佸惛寮曞瓙銆佷环鍊艰绠楄嚜閫傚簲妯 t 浣嶇疆銆?     杩斿洖 t 鍊煎垪琛紝涓嶅啀绛夎窛銆?     """
+-    if not lines or not xs or not ys:
++    if not lines or not xs or not ys or len(xs) < 2:
+         return _fallback_t_positions(base_spacing)
+ 
+     ax = attractor_x if attractor_x is not None else site_width / 2
+diff --git a/tensor_field.py b/tensor_field.py
+index 427f1c0..8e47310 100644
+--- a/tensor_field.py
++++ b/tensor_field.py
+@@ -202,10 +202,10 @@ def _build_design_elements(basis, centers, blend_factor,
+         elements.append({"type": "grid", "pos": (cx0, cy0), "tensor_const": t, "weight": 1.0, "rbf_decay": 0})
+ 
+     elif basis == BASIS_RADIAL:
+-        # 寰勫悜鍩哄簳锛氬壇鐗瑰緛鍚戦噺鎸囧悜涓績锛屾墍鏈夊壇瓒呮祦绾挎眹鑱氫簬涓績瀵艰嚧鍥㈢姸銆?-        # 娣峰叆灏戦噺缃戞牸鍒嗛噺锛堢害 18%锛夋墦鐮村畬缇庡緞鍚戯紝浣胯閬撳垎鏁ｃ€?+        # 寰勫悜鍩哄簳锛氫笉璁?radial 鐙崰鍏ㄥ眬锛岃嚜鍔ㄥ姞鍏ユ洿寮虹殑 grid 鍒嗛噺銆?+        # grid 涓诲鍏ㄥ眬锛宺adial 浣滀负灞€閮ㄦ壈鍔紝閬垮厤绐勫満鍦板唴澶ч噺绾胯瑁佸壀銆?         t_grid = _tensor_from_direction(1.0, 0.0)
+-        elements.append({"type": "grid", "pos": (cx0, cy0), "tensor_const": t_grid, "weight": 0.18, "rbf_decay": 0})
++        elements.append({"type": "grid", "pos": (cx0, cy0), "tensor_const": t_grid, "weight": 0.55, "rbf_decay": 0})
+         for cx, cy in centers:
+             def radial_fn(px, py, cxx=cx, cyy=cy):
+                 dx = px - cxx
+@@ -425,6 +425,45 @@ def laplacian_smooth_tensor_grid(grid_a, grid_b, nx, ny, iterations=3):
+     return src_a, src_b
+ 
+ 
++def create_tensor_grid_fn(tensor_fn, site_width, site_height, grid_step=40):
++    """
++    棰勮绠楀紶閲忓満缃戞牸锛岀敤鍙岀嚎鎬ф彃鍊兼浛浠ｆ瘡娆″畬鏁磋绠椼€?+    鐢ㄤ簬瓒呮祦绾垮姞閫燂細涓€娆￠噰鏍?~(w/step)*(h/step) 鐐癸紝涔嬪悗姣忔鏌ヨ O(1)銆?+    """
++    nx = max(2, int(site_width / grid_step) + 1)
++    ny = max(2, int(site_height / grid_step) + 1)
++    inv_nx = 1.0 / max(nx - 1, 1)
++    inv_ny = 1.0 / max(ny - 1, 1)
++    grid_a = [[0.0] * nx for _ in range(ny)]
++    grid_b = [[0.0] * nx for _ in range(ny)]
++    for j in range(ny):
++        for i in range(nx):
++            x = i * inv_nx * site_width
++            y = j * inv_ny * site_height
++            ux, uy, vx, vy = tensor_fn(x, y)
++            theta = math.atan2(uy, ux)
++            theta2 = 2 * theta
++            grid_a[j][i] = math.cos(theta2)
++            grid_b[j][i] = math.sin(theta2)
++
++    inv_w = 1.0 / site_width if site_width > 0 else 0
++    inv_h = 1.0 / site_height if site_height > 0 else 0
++    nx1, ny1 = nx - 1, ny - 1
++
++    def grid_fn(x, y):
++        xi = x * inv_w * nx1
++        yi = y * inv_h * ny1
++        i0 = max(0, min(nx - 2, int(xi)))
++        j0 = max(0, min(ny - 2, int(yi)))
++        u, v = xi - i0, yi - j0
++        omu, omv = 1 - u, 1 - v
++        a = omu * omv * grid_a[j0][i0] + omu * v * grid_a[j0+1][i0] + u * omv * grid_a[j0][i0+1] + u * v * grid_a[j0+1][i0+1]
++        b = omu * omv * grid_b[j0][i0] + omu * v * grid_b[j0+1][i0] + u * omv * grid_b[j0][i0+1] + u * v * grid_b[j0+1][i0+1]
++        return _tensor_to_eigenvectors(a, b) or (1.0, 0.0, 0.0, 1.0)
++
++    return grid_fn
++
++
+ def create_smoothed_tensor_fn(tensor_fn, site_width, site_height, grid_step=20, smooth_iterations=3):
+     """
+     鍒涘缓缁忚繃 Laplacian 骞虫粦鐨勫紶閲忓満閲囨牱鍑芥暟銆?diff --git a/utils.py b/utils.py
+index a55a370..bfa2e81 100644
+--- a/utils.py
++++ b/utils.py
+@@ -51,11 +51,6 @@ def lerp(a, b, t):
+     return a + (b - a) * t
+ 
+ 
+-def noise(x, y):
+-    """绠€鏄撳櫔澹板嚱鏁?(Lattice Noise)"""
+-    return (math.sin(x * 0.01) * math.cos(y * 0.01) + math.sin(x * 0.02 + y * 0.015)) * 0.5
+-
+-
+ def safe_float(val, default):
+     """瀹夊叏杞崲涓?float"""
+     try:

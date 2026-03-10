@@ -57,7 +57,7 @@ python main.py
 
 ## 使用说明
 
-1. 启动程序后，左侧为控制面板，右侧为预览画布。右上角可切换 **EN / 中文** 界面。
+1. 启动程序后，左侧为控制面板，右侧为预览画布。右上角可切换 **EN / 中文** 界面。画布支持滚轮缩放、右键拖拽平移、双击重置视图。
 2. 选择 **Run Mode**：A 流线 / B 街道网络 / C 地块 / D 超流线。
 3. 选择 **Tensor Basis**：Grid / Radial / Blend / Boundary / Boundary+Grid / Height / Height+Grid。
 4. **Boundary** 基底：勾选 Use River Boundary，可手绘河流或加载 GIF 遮罩图。
@@ -72,24 +72,24 @@ python main.py
 
 ```
 tensor-field/
-├── main.py              # 程序入口
-├── app.py               # 主应用类 UrbanFieldGenerator（UI + 逻辑编排）
-├── app_single_file.py   # 单文件构建（由 build_single_file.py 生成）
-├── build_single_file.py # 构建脚本
-├── tensor_field.py      # 张量场模块（7 种基底，街道生成）
-├── i18n.py              # 中英文双语界面
-├── parcel_subdivision.py # 地块划分（frontage-based、block-by-block、转角、扰动）
-├── config.py            # 配置常量（T_STEP, T_COUNT）
-├── utils.py             # 工具函数（lerp, noise, perlin_noise, safe_float, safe_int）
-├── geom.py              # 几何裁剪（线段/折线/多边形裁剪到矩形）
-├── curve.py             # 曲线插值（Catmull-Rom 样条、弧长采样）
-├── street_network.py    # 街道网络（道路等级、自适应横街）
-├── boundary_field.py    # 边界场（曲线/遮罩图→边界方向）
-├── height_field.py      # 高程场（灰度高程图→梯度→张量基底）
-├── hyperstreamline.py   # 超流线（主/副追踪、种子点、停止条件）
+├── main.py                      # 程序入口
+├── app.py                       # 主应用（UI + 逻辑编排）
+├── app_single_file.py           # 单文件构建（由 build_single_file.py 生成）
+├── build_single_file.py         # 构建脚本
+├── tensor_field.py              # 张量场（7 种基底、街道生成、Laplacian 平滑、笔刷）
+├── i18n.py                      # 中英文双语界面
+├── config.py                    # 配置常量（T_STEP, T_COUNT, DRAW_PADDING）
+├── utils.py                     # 工具函数（perlin_noise, safe_float, safe_int）
+├── geom.py                      # 几何裁剪（线段/折线/多边形裁剪到矩形）
+├── curve.py                     # 曲线插值（Catmull-Rom 样条、弧长采样）
+├── street_network.py            # 街道网络（道路等级、自适应横街）
+├── boundary_field.py            # 边界场（曲线/遮罩图→边界方向）
+├── height_field.py              # 高程场（灰度高程图→梯度→张量基底）
+├── hyperstreamline.py           # 超流线（主/副追踪、种子点、停止条件）
 ├── street_from_hyperstreamlines.py  # 论文式街道生成（交替追踪、交点图、二阶段）
-├── exporter.py          # 导出逻辑（RhinoScript、DXF）
-├── requirements.txt     # 可选依赖（ezdxf: DXF 导出，Pillow: 高程图 PNG/JPG）
+├── parcel_subdivision.py        # 地块划分（frontage-based、block-by-block、转角、扰动）
+├── exporter.py                  # 导出逻辑（RhinoScript、DXF）
+├── requirements.txt             # 可选依赖（ezdxf: DXF 导出，Pillow: 高程图 PNG/JPG）
 └── README.md
 ```
 
@@ -104,7 +104,7 @@ tensor-field/
 ## 技术说明
 
 - 采用笛卡尔坐标系，张量场基于 2×2 对称无迹矩阵表示（参考 Chen et al. SIGGRAPH 2008）。
-- 使用 Lattice Noise 实现简易噪声扰动。
+- 使用 Perlin 噪声（论文 5.3）实现旋转场，产生有机街道模式。
 - 界面为 Tkinter 深色主题，适合长时间使用。
 
 ## 版本

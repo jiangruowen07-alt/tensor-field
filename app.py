@@ -45,6 +45,7 @@ from tensor_field import (
     sample_tensor_field_grid,
     generate_streets_from_tensor_field,
     create_tensor_field_fn,
+    create_tensor_grid_fn,
     create_smoothed_tensor_fn,
     BASIS_GRID,
     BASIS_RADIAL,
@@ -88,6 +89,9 @@ class UrbanFieldGenerator:
         self._gen_queue = queue.Queue()
         self._gen_thread = None
         self._gen_polling = False
+        self._generation_id = 0
+        self._last_tensor_fn = None
+        self._last_hyper_seeds = None
         self._river_mask_image = None
         self._height_image = None
         self._height_gradient_fn = None
@@ -97,6 +101,13 @@ class UrbanFieldGenerator:
         self.brush_strokes = []
         self.brush_draw_mode = False
         self._current_brush_stroke = []
+
+        # 视图缩放与平移
+        self._view_zoom = 1.0
+        self._view_cx = 600.0  # 视口中心对应的逻辑坐标 x
+        self._view_cy = 100.0  # 视口中心对应的逻辑坐标 y
+        self._pan_start = None  # (canvas_x, canvas_y, view_cx, view_cy) 拖动开始时
+        self._last_applied_result = None  # 上次绘制结果，用于平移/缩放时快速重绘
 
         self._build_ui()
         self._bind_events()
@@ -224,13 +235,13 @@ class UrbanFieldGenerator:
         tk.Checkbutton(panel, text=TWO_STAGE, variable=self.controls["twoStage"], command=self.update_state,
                       bg="#141414", fg="#e0e0e0", selectcolor="#1a1a1a", activebackground="#141414",
                       activeforeground="#e0e0e0", font=("Inter", 9)).pack(anchor="w", pady=(0, 4))
-        self._label_group(panel, PERLIN_ROTATION, "0.2", right_key="perlinStrVal", t_key="perlin_strength")
+        self._label_group(panel, PERLIN_ROTATION, "0.05", right_key="perlinStrVal", t_key="perlin_strength")
         self.controls["perlinStrength"] = tk.Scale(panel, from_=0, to=1, resolution=0.05, orient=tk.HORIZONTAL,
                                                   bg="#141414", fg="#e0e0e0", troughcolor="#2a2a2a",
                                                   highlightthickness=0, showvalue=False, command=lambda v: self.update_state())
-        self.controls["perlinStrength"].set(0.2)
+        self.controls["perlinStrength"].set(0.05)
         self.controls["perlinStrength"].pack(fill=tk.X, pady=(0, 4))
-        self.controls["laplacianSmooth"] = tk.BooleanVar(value=False)
+        self.controls["laplacianSmooth"] = tk.BooleanVar(value=True)
         tk.Checkbutton(panel, text=LAPLACIAN_SMOOTH, variable=self.controls["laplacianSmooth"], command=self.update_state,
                       bg="#141414", fg="#e0e0e0", selectcolor="#1a1a1a", activebackground="#141414",
                       activeforeground="#e0e0e0", font=("Inter", 9)).pack(anchor="w", pady=(0, 4))
@@ -252,11 +263,11 @@ class UrbanFieldGenerator:
         tk.Label(panel, text="", bg="#141414", font=("Inter", 4)).pack()
 
         self._section_labels.append(self._section_title(panel, T["section_expansion"]))
-        self._label_group(panel, T["line_spacing"], "65", right_key="spacingVal", t_key="line_spacing")
+        self._label_group(panel, T["line_spacing"], "20", right_key="spacingVal", t_key="line_spacing")
         self.controls["lineSpacing"] = tk.Scale(panel, from_=20, to=120, orient=tk.HORIZONTAL,
                                                 bg="#141414", fg="#e0e0e0", troughcolor="#2a2a2a",
                                                 highlightthickness=0, showvalue=False)
-        self.controls["lineSpacing"].set(65)
+        self.controls["lineSpacing"].set(20)
         self.controls["lineSpacing"].pack(fill=tk.X, pady=(0, 10))
 
         self._label_group(panel, T["pos_count"], t_key="pos_count")
@@ -422,7 +433,8 @@ class UrbanFieldGenerator:
         canvas_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=32, pady=32)
         self.canvas = tk.Canvas(canvas_frame, bg="#050505", highlightthickness=0)
         self.canvas.pack(expand=True)
-        self.status_label = tk.Label(canvas_frame, text=T["status_default"],
+        _status = T["status_default"] + "\n" + T.get("status_view_hint", "")
+        self.status_label = tk.Label(canvas_frame, text=_status,
                                     fg="#4d4d4d", bg="#050505", font=("JetBrains Mono", 9),
                                     justify=tk.RIGHT, wraplength=280)
         self.status_label.place(relx=1.0, rely=1.0, anchor="se", x=-32, y=-32)
@@ -469,6 +481,17 @@ class UrbanFieldGenerator:
         """For offset engine (B/C): default to parallel"""
         return "1"
 
+    def _clamp_centers(self):
+        """将所有 tensor center 限制在场地内部 x∈[0,siteWidth] y∈[0,siteHeight]"""
+        w = self.state.get("siteWidth", 1200)
+        h = self.state.get("siteHeight", 200)
+        self.tensor_centers = [
+            (max(0, min(w, cx)), max(0, min(h, cy)))
+            for cx, cy in self.tensor_centers
+        ]
+        if not self.tensor_centers:
+            self.tensor_centers = [(w / 2, h / 2)]
+
     def _get_basis_type(self):
         val = self.controls["basisType"].get()
         if "Radial" in val or "径向" in val:
@@ -491,13 +514,13 @@ class UrbanFieldGenerator:
             w.destroy()
         basis = self._get_basis_type()
         if basis == BASIS_BLEND:
-            self._label_group(self._basis_params_frame, BASIS_BLEND_FACTOR, "0.5", right_key="basisBlendVal", t_key="BASIS_BLEND_FACTOR")
+            self._label_group(self._basis_params_frame, BASIS_BLEND_FACTOR, "0.35", right_key="basisBlendVal", t_key="BASIS_BLEND_FACTOR")
             self.controls["basisBlendFactor"] = tk.Scale(
                 self._basis_params_frame, from_=0, to=1, resolution=0.1, orient=tk.HORIZONTAL,
                 bg="#141414", fg="#e0e0e0", troughcolor="#2a2a2a",
                 highlightthickness=0, showvalue=False,
                 command=lambda v: self._update_basis_blend_label())
-            self.controls["basisBlendFactor"].set(0.5)
+            self.controls["basisBlendFactor"].set(0.35)
             self.controls["basisBlendFactor"].pack(fill=tk.X, pady=(0, 4))
             self._bind_recursive(self._basis_params_frame, self.update_state)
         elif basis in (BASIS_BOUNDARY, BASIS_BOUNDARY_BLEND):
@@ -532,6 +555,11 @@ class UrbanFieldGenerator:
             self._bind_recursive(self._basis_params_frame, self.update_state)
         self._build_river_boundary_ui()
         self._build_height_field_ui()
+        w, h = safe_float(self.controls["siteWidth"].get(), 1200), safe_float(self.controls["siteHeight"].get(), 200)
+        if basis == BASIS_BLEND:
+            self.tensor_centers = [(400, 100), (800, 100)]
+        elif basis == BASIS_RADIAL:
+            self.tensor_centers = [(300, 100), (600, 100), (900, 100)]
         self.update_state()
 
     def _build_river_boundary_ui(self):
@@ -638,12 +666,12 @@ class UrbanFieldGenerator:
         else:
             if "btnAddSeed" in self.controls:
                 self.controls["btnAddSeed"].config(text=BTN_ADD_SEED, bg="#2a4a3a")
-            self.status_label.config(text=T["status_default"])
+            self.status_label.config(text=T["status_default"] + "\n" + T.get("status_view_hint", ""))
         self.update_state()
 
     def _clear_hyper_seeds(self):
         self.hyperstreamline_seeds.clear()
-        self.update_state()
+        self.update_state(immediate=True)
 
     def _update_height_blend_label(self):
         if "heightBlendVal" in self.controls and "heightBlendFactor" in self.controls:
@@ -715,14 +743,14 @@ class UrbanFieldGenerator:
         else:
             if "btnAddCenter" in self.controls:
                 self.controls["btnAddCenter"].config(text=BTN_ADD_CENTER, bg="#2a4a3a")
-            self.status_label.config(text=T["status_default"])
+            self.status_label.config(text=T["status_default"] + "\n" + T.get("status_view_hint", ""))
         self.update_state()
 
     def _clear_tensor_centers(self):
         w = safe_float(self.controls["siteWidth"].get(), 1200)
         h = safe_float(self.controls["siteHeight"].get(), 200)
         self.tensor_centers = [(w / 2, h / 2)]
-        self.update_state()
+        self.update_state(immediate=True)
 
     def _toggle_brush_mode(self):
         self.brush_draw_mode = not self.brush_draw_mode
@@ -737,13 +765,13 @@ class UrbanFieldGenerator:
             self._current_brush_stroke = []
             if "btnDrawBrush" in self.controls:
                 self.controls["btnDrawBrush"].config(text=BTN_DRAW_BRUSH, bg="#2a4a3a")
-            self.status_label.config(text=T["status_default"])
+            self.status_label.config(text=T["status_default"] + "\n" + T.get("status_view_hint", ""))
         self.update_state()
 
     def _clear_brush(self):
         self.brush_strokes = []
         self._current_brush_stroke = []
-        self.update_state()
+        self.update_state(immediate=True)
 
     def _update_boundary_labels(self):
         if "boundaryDecayVal" in self.controls and "boundaryDecay" in self.controls:
@@ -824,7 +852,7 @@ class UrbanFieldGenerator:
         self.editing_curve_index = -1
         if self.draw_mode:
             self._exit_draw_mode()
-        self.update_state()
+        self.update_state(immediate=True)
 
     def _toggle_draw_mode(self):
         if self.draw_mode:
@@ -838,7 +866,7 @@ class UrbanFieldGenerator:
         self.editing_curve_index = -1
         if "btnDrawRiver" in self.controls and self.controls["btnDrawRiver"].winfo_exists():
             self.controls["btnDrawRiver"].config(text=BTN_DRAW_RIVER, bg="#2a4a2a")
-        self.status_label.config(text=T["status_default"])
+        self.status_label.config(text=T["status_default"] + "\n" + T.get("status_view_hint", ""))
         self._refresh_curve_list()
 
     def _find_point_at(self, canvas_x, canvas_y, radius=10):
@@ -847,7 +875,8 @@ class UrbanFieldGenerator:
         for ci, curve in enumerate(self.custom_seed_curves):
             pts = self._get_curve_points(curve)
             for pi, (px, py) in enumerate(pts):
-                d = (lx - px) ** 2 + (ly - py) ** 2
+                dx, dy = lx - px, ly - py
+                d = dx * dx + dy * dy
                 if d < best_d:
                     best_d, best_ci, best_pi = d, ci, pi
         return (best_ci, best_pi)
@@ -857,7 +886,8 @@ class UrbanFieldGenerator:
         best_i, best_d = -1, radius * radius
         for i, (cx, cy) in enumerate(self.tensor_centers):
             px, py = self._pad(cx, cy)
-            d = (canvas_x - px) ** 2 + (canvas_y - py) ** 2
+            dx, dy = canvas_x - px, canvas_y - py
+            d = dx * dx + dy * dy
             if d < best_d:
                 best_d, best_i = d, i
         return best_i
@@ -903,7 +933,8 @@ class UrbanFieldGenerator:
             ly = max(0, min(h, ly))
             if 0 <= self.drag_center_idx < len(self.tensor_centers):
                 self.tensor_centers[self.drag_center_idx] = (lx, ly)
-                self.update_state(immediate=True)
+                self.state["tensorCenters"] = list(self.tensor_centers)
+                self._redraw_from_last(override_centers=self.tensor_centers)
             return
         if self.drag_curve_idx is not None and self.drag_point_idx is not None:
             pts = self._get_curve_points(self.custom_seed_curves[self.drag_curve_idx])
@@ -911,12 +942,16 @@ class UrbanFieldGenerator:
                 lx, ly = self._unpad(event.x, event.y)
                 pts[self.drag_point_idx] = (lx, ly)
                 self._refresh_curve_list()
-                self.update_state(immediate=True)
+                self._redraw_from_last()
 
     def _on_canvas_release(self, event):
+        was_dragging_center = self.drag_center_idx is not None
+        was_dragging_curve = self.drag_curve_idx is not None
         self.drag_curve_idx = None
         self.drag_point_idx = None
         self.drag_center_idx = None
+        if was_dragging_center or was_dragging_curve:
+            self.update_state(immediate=True)
 
     def update_state(self, immediate=False):
         if "lineSpacing" not in self.controls:
@@ -925,15 +960,18 @@ class UrbanFieldGenerator:
         self.state["fieldType"] = self._get_field_type()
         self.state["basisType"] = self._get_basis_type()
         self.state["basisBlendFactor"] = safe_float(
-            self.controls["basisBlendFactor"].get(), 0.5) if "basisBlendFactor" in self.controls and self.controls["basisBlendFactor"].winfo_exists() else 0.5
+            self.controls["basisBlendFactor"].get(), 0.35) if "basisBlendFactor" in self.controls and self.controls["basisBlendFactor"].winfo_exists() else 0.35
         self.state["boundaryDecay"] = safe_float(
             self.controls["boundaryDecay"].get(), 150) if "boundaryDecay" in self.controls and self.controls["boundaryDecay"].winfo_exists() else 150
         self.state["boundaryBlendFactor"] = safe_float(
             self.controls["boundaryBlendFactor"].get(), 0.5) if "boundaryBlendFactor" in self.controls and self.controls["boundaryBlendFactor"].winfo_exists() else 0.5
         self.state["heightBlendFactor"] = safe_float(
             self.controls["heightBlendFactor"].get(), 0.5) if "heightBlendFactor" in self.controls and self.controls["heightBlendFactor"].winfo_exists() else 0.5
-        self.state["siteWidth"] = safe_float(self.controls["siteWidth"].get(), 1200)
-        self.state["siteHeight"] = safe_float(self.controls["siteHeight"].get(), 200)
+        w = safe_float(self.controls["siteWidth"].get(), 1200)
+        h = safe_float(self.controls["siteHeight"].get(), 200)
+        self.state["siteWidth"] = w
+        self.state["siteHeight"] = h
+        self._clamp_centers()
         self.state["tensorCenters"] = list(self.tensor_centers)
         self.state["brushStrokes"] = [list(s) for s in self.brush_strokes]
         try:
@@ -942,10 +980,10 @@ class UrbanFieldGenerator:
         except Exception:
             self.state["streetGenMode"] = STREET_PARAM
             self.state["twoStage"] = False
-        self.state["perlinStrength"] = safe_float(self.controls["perlinStrength"].get(), 0.2) if "perlinStrength" in self.controls else 0
-        self.state["laplacianSmooth"] = self.controls["laplacianSmooth"].get() if "laplacianSmooth" in self.controls else False
+        self.state["perlinStrength"] = safe_float(self.controls["perlinStrength"].get(), 0.05) if "perlinStrength" in self.controls else 0
+        self.state["laplacianSmooth"] = self.controls["laplacianSmooth"].get() if "laplacianSmooth" in self.controls else True
         self.state["smoothIters"] = safe_int(self.controls["smoothIters"].get(), 3) if "smoothIters" in self.controls else 3
-        self.state["lineSpacing"] = safe_float(self.controls["lineSpacing"].get(), 65)
+        self.state["lineSpacing"] = safe_float(self.controls["lineSpacing"].get(), 20)
         self.state["posCount"] = safe_int(self.controls["posCount"].get(), 10)
         self.state["negCount"] = safe_int(self.controls["negCount"].get(), 10)
         self.state["spacingMode"] = self._get_spacing_mode()
@@ -991,6 +1029,16 @@ class UrbanFieldGenerator:
             self.canvas.bind("<Button-1>", self._on_canvas_click)
             self.canvas.bind("<B1-Motion>", self._on_canvas_drag)
             self.canvas.bind("<ButtonRelease-1>", self._on_canvas_release)
+            self.canvas.bind("<Button-2>", self._on_canvas_pan_start)
+            self.canvas.bind("<Button-3>", self._on_canvas_pan_start)
+            self.canvas.bind("<B2-Motion>", self._on_canvas_pan_drag)
+            self.canvas.bind("<B3-Motion>", self._on_canvas_pan_drag)
+            self.canvas.bind("<ButtonRelease-2>", self._on_canvas_pan_end)
+            self.canvas.bind("<ButtonRelease-3>", self._on_canvas_pan_end)
+            self.canvas.bind("<MouseWheel>", self._on_canvas_wheel)
+            self.canvas.bind("<Button-4>", self._on_canvas_wheel)
+            self.canvas.bind("<Button-5>", self._on_canvas_wheel)
+            self.canvas.bind("<Double-Button-1>", self._on_canvas_double_click)
             self._canvas_custom_bound = True
         run_mode = self._get_run_mode()
         if run_mode == "D":
@@ -1000,6 +1048,20 @@ class UrbanFieldGenerator:
             for w in self._hyperstreamline_frame.winfo_children():
                 w.destroy()
         self.resize_canvas()
+        if not (self.draw_mode or self.brush_draw_mode or self.hyperstreamline_seed_mode or self.tensor_center_add_mode):
+            base = T["status_default"] + "\n" + T.get("status_view_hint", "")
+            w, h = self.state.get("siteWidth", 1200), self.state.get("siteHeight", 200)
+            basis = self._get_basis_type()
+            use_hyper = "streetGenMode" in self.controls and self.controls["streetGenMode"].get() == STREET_HYPER
+            two_stage = "twoStage" in self.controls and self.controls["twoStage"].get()
+            line_sp = self.state.get("lineSpacing", 20)
+            if use_hyper:
+                major_d = max(36, min(46, line_sp * 0.72)) if not two_stage else max(42, min(52, line_sp * 0.80))
+                minor_d = max(12, min(18, line_sp * 0.24)) if not two_stage else max(20, min(26, line_sp * 0.40))
+                base += f"\nmajor_d_sep={major_d} minor_d_sep={minor_d} basis={basis}"
+            if w == 1200 and h == 200 and basis == BASIS_RADIAL:
+                base += "\n" + T.get("status_narrow_radial_hint", "")
+            self.status_label.config(text=base)
         if immediate:
             if self._generate_after_id:
                 self.root.after_cancel(self._generate_after_id)
@@ -1021,15 +1083,87 @@ class UrbanFieldGenerator:
     def resize_canvas(self):
         w = int(self.state["siteWidth"])
         h = int(self.state["siteHeight"])
-        self.canvas.config(width=w + 2 * DRAW_PADDING, height=h + 2 * DRAW_PADDING)
+        target_w = w + 2 * DRAW_PADDING
+        target_h = h + 2 * DRAW_PADDING
+        if self.canvas.winfo_width() != target_w or self.canvas.winfo_height() != target_h:
+            self.canvas.config(width=target_w, height=target_h)
 
     def _pad(self, x, y):
-        """逻辑坐标转画布坐标"""
-        return x + DRAW_PADDING, y + DRAW_PADDING
+        """逻辑坐标转画布坐标（含缩放与平移）"""
+        cv_w = max(1, self.canvas.winfo_width())
+        cv_h = max(1, self.canvas.winfo_height())
+        cx = (x - self._view_cx) * self._view_zoom + cv_w / 2
+        cy = (y - self._view_cy) * self._view_zoom + cv_h / 2
+        return cx, cy
 
     def _unpad(self, cx, cy):
         """画布坐标转逻辑坐标"""
-        return cx - DRAW_PADDING, cy - DRAW_PADDING
+        cv_w = max(1, self.canvas.winfo_width())
+        cv_h = max(1, self.canvas.winfo_height())
+        x = (cx - cv_w / 2) / self._view_zoom + self._view_cx
+        y = (cy - cv_h / 2) / self._view_zoom + self._view_cy
+        return x, y
+
+    def _reset_view(self):
+        """重置视图到默认缩放与位置"""
+        pw = self.state.get("siteWidth", 1200)
+        ph = self.state.get("siteHeight", 200)
+        self._view_zoom = 1.0
+        self._view_cx = pw / 2.0
+        self._view_cy = ph / 2.0
+        self._pan_start = None
+        self.generate()
+
+    def _on_canvas_wheel(self, event):
+        """鼠标滚轮缩放"""
+        pw = self.state.get("siteWidth", 1200)
+        ph = self.state.get("siteHeight", 200)
+        cv_w = max(1, self.canvas.winfo_width())
+        cv_h = max(1, self.canvas.winfo_height())
+        # 鼠标位置对应的逻辑坐标
+        lx = (event.x - cv_w / 2) / self._view_zoom + self._view_cx
+        ly = (event.y - cv_h / 2) / self._view_zoom + self._view_cy
+        delta = event.delta
+        if hasattr(event, "num") and event.num in (4, 5):
+            delta = 120 if event.num == 4 else -120
+        factor = 1.15 if delta > 0 else 1 / 1.15
+        zoom_new = max(0.1, min(20.0, self._view_zoom * factor))
+        # 保持鼠标下的逻辑点不变
+        self._view_cx = lx - (event.x - cv_w / 2) / zoom_new
+        self._view_cy = ly - (event.y - cv_h / 2) / zoom_new
+        self._view_zoom = zoom_new
+        self._redraw_from_last()
+
+    def _on_canvas_pan_start(self, event):
+        """开始平移（右键或中键按下）"""
+        self._pan_start = (event.x, event.y, self._view_cx, self._view_cy)
+
+    def _on_canvas_pan_drag(self, event):
+        """平移拖动"""
+        if self._pan_start is None:
+            return
+        dx = event.x - self._pan_start[0]
+        dy = event.y - self._pan_start[1]
+        self._view_cx = self._pan_start[2] - dx / self._view_zoom
+        self._view_cy = self._pan_start[3] - dy / self._view_zoom
+        self._redraw_from_last()
+
+    def _on_canvas_pan_end(self, event):
+        """结束平移"""
+        self._pan_start = None
+
+    def _on_canvas_double_click(self, event):
+        """双击重置视图（非编辑模式下）"""
+        if not (self.tensor_center_add_mode or self.hyperstreamline_seed_mode or
+                self.brush_draw_mode or self.draw_mode):
+            self._reset_view()
+
+    def _redraw_from_last(self, override_centers=None):
+        """根据上次结果重绘，用于平移/缩放/拖动时快速刷新。override_centers 用于拖动中心点时实时显示"""
+        if self._last_applied_result is not None:
+            self._apply_gen_result(self._last_applied_result, override_centers=override_centers)
+        else:
+            self._show_calculating()
 
     def _draw_cross_glyph(self, x, y, ux, uy, vx, vy, half_len=8, fill="#888888", width=1):
         """在 (x,y) 绘制十字短线方向纹理：沿 u 和 v 方向各一条短线"""
@@ -1093,22 +1227,27 @@ class UrbanFieldGenerator:
         """在画布上显示计算中提示"""
         pw, ph = self.state.get("siteWidth", 1200), self.state.get("siteHeight", 200)
         self.canvas.delete("all")
-        self.canvas.create_rectangle(DRAW_PADDING, DRAW_PADDING, DRAW_PADDING + pw, DRAW_PADDING + ph,
-                                     outline="#555555", width=2, dash=(4, 4))
-        cx, cy = DRAW_PADDING + pw / 2, DRAW_PADDING + ph / 2
+        x1, y1 = self._pad(0, 0)
+        x2, y2 = self._pad(pw, ph)
+        self.canvas.create_rectangle(x1, y1, x2, y2, outline="#555555", width=2, dash=(4, 4))
+        cx, cy = self._pad(pw / 2, ph / 2)
         self.canvas.create_text(cx, cy, text="Calculating...", fill="#888888", font=("Inter", 14))
         self.canvas.update_idletasks()
 
-    def _apply_gen_result(self, result):
-        """在主线程应用生成结果"""
+    def _apply_gen_result(self, result, override_centers=None):
+        """在主线程应用生成结果。override_centers 用于拖动时覆盖 centers 显示"""
         if result is None:
             return
+        if result.get("generation_id", 0) != self._generation_id:
+            return
+        self._last_applied_result = result
         if result.get("kind") == "error":
             self.canvas.delete("all")
             pw, ph = self.state.get("siteWidth", 1200), self.state.get("siteHeight", 200)
-            self.canvas.create_rectangle(DRAW_PADDING, DRAW_PADDING, DRAW_PADDING + pw, DRAW_PADDING + ph,
-                                         outline="#555555", width=2, dash=(4, 4))
-            cx, cy = DRAW_PADDING + pw / 2, DRAW_PADDING + ph / 2
+            x1, y1 = self._pad(0, 0)
+            x2, y2 = self._pad(pw, ph)
+            self.canvas.create_rectangle(x1, y1, x2, y2, outline="#555555", width=2, dash=(4, 4))
+            cx, cy = self._pad(pw / 2, ph / 2)
             self.canvas.create_text(cx, cy, text="Error: " + result.get("msg", "?"), fill="#cc6666", font=("Inter", 10))
             return
         kind = result.get("kind")
@@ -1123,7 +1262,10 @@ class UrbanFieldGenerator:
                 curve_arrays_by_curve=result["curve_arrays_by_curve"],
             )
         elif kind == "A":
-            self.draw_result(mode_a_data=result["mode_a_data"])
+            data = result["mode_a_data"]
+            if override_centers is not None:
+                data = dict(data, centers=list(override_centers))
+            self.draw_result(mode_a_data=data)
 
     def _poll_gen_queue(self):
         """轮询后台生成结果"""
@@ -1140,18 +1282,20 @@ class UrbanFieldGenerator:
 
     def _run_generate_worker(self, data):
         """后台线程执行的重计算逻辑"""
+        generation_id = data.get("generation_id", 0)
         try:
             result = self._do_generate(data)
+            result["generation_id"] = generation_id
             self._gen_queue.put(result)
         except Exception as e:
-            self._gen_queue.put({"kind": "error", "msg": str(e)})
+            self._gen_queue.put({"kind": "error", "msg": str(e), "generation_id": generation_id})
 
     def _do_generate(self, data):
         """纯计算逻辑，可在线程中运行。data 为预捕获的参数字典"""
         s = data["state"]
         basis = s.get("basisType", BASIS_GRID)
         centers = data["centers"]
-        blend = s.get("basisBlendFactor", 0.5)
+        blend = s.get("basisBlendFactor", 0.35)
         boundary = data["boundary"]
         boundary_decay = s.get("boundaryDecay", 150)
         boundary_blend = s.get("boundaryBlendFactor", 0.5)
@@ -1163,7 +1307,7 @@ class UrbanFieldGenerator:
         if s.get("runMode") == "A":
             samples = sample_tensor_field_grid(
                 s["siteWidth"], s["siteHeight"],
-                basis, centers, blend_factor=blend, grid_step=40,
+                basis, centers, blend_factor=blend, grid_step=60,
                 boundary=boundary, boundary_decay=boundary_decay, boundary_blend=boundary_blend,
                 height_gradient_fn=height_gradient_fn, height_blend=height_blend,
                 brush_strokes=brush_strokes, brush_decay=80,
@@ -1181,15 +1325,20 @@ class UrbanFieldGenerator:
         )
 
         if s.get("runMode") == "D":
-            tensor_fn = _base_tensor_fn
             if data.get("laplacian_smooth"):
                 tensor_fn = create_smoothed_tensor_fn(
                     _base_tensor_fn, s["siteWidth"], s["siteHeight"],
-                    grid_step=30, smooth_iterations=data.get("smooth_iters", 2),
+                    grid_step=20, smooth_iterations=data.get("smooth_iters", 2),
+                )
+            else:
+                tensor_fn = create_tensor_grid_fn(
+                    _base_tensor_fn, s["siteWidth"], s["siteHeight"], grid_step=25,
                 )
             seeds = data["hyper_seeds"]
             step_size = data.get("step_size", 2.5)
             max_length = data.get("max_length")
+            if max_length is None or max_length <= 0:
+                max_length = max(s["siteWidth"], s["siteHeight"]) * 1.2
             angle_stop = data.get("angle_stop", 0.3)
             use_major = data.get("use_major", True)
             use_minor = data.get("use_minor", False)
@@ -1198,12 +1347,14 @@ class UrbanFieldGenerator:
             if use_major:
                 major_lines = integrate_hyperstreamlines_from_seeds(
                     tensor_fn, seeds, use_major=True, step_size=step_size,
-                    max_length=max_length, bounds=bounds, angle_threshold=angle_stop, max_steps=220)
+                    max_length=max_length, bounds=bounds, angle_threshold=angle_stop,
+                    max_steps=700, use_euler=False)
                 lines_by_curve.extend(major_lines)
             if use_minor:
                 minor_lines = integrate_hyperstreamlines_from_seeds(
                     tensor_fn, seeds, use_major=False, step_size=step_size,
-                    max_length=max_length, bounds=bounds, angle_threshold=angle_stop, max_steps=220)
+                    max_length=max_length, bounds=bounds, angle_threshold=angle_stop,
+                    max_steps=700, use_euler=False)
                 lines_by_curve.extend(minor_lines)
             if not lines_by_curve:
                 lines_by_curve = [[]]
@@ -1216,28 +1367,39 @@ class UrbanFieldGenerator:
         use_hyper = data.get("use_hyper", False)
         two_stage = data.get("two_stage", False)
 
-        tensor_fn = _base_tensor_fn
-        if data.get("laplacian_smooth"):
-            tensor_fn = create_smoothed_tensor_fn(
-                _base_tensor_fn, s["siteWidth"], s["siteHeight"],
-                grid_step=30, smooth_iterations=data.get("smooth_iters", 2),
-            )
-
         if use_hyper:
+            if data.get("laplacian_smooth"):
+                tensor_fn = create_smoothed_tensor_fn(
+                    _base_tensor_fn, s["siteWidth"], s["siteHeight"],
+                    grid_step=20, smooth_iterations=data.get("smooth_iters", 2),
+                )
+            else:
+                tensor_fn = create_tensor_grid_fn(
+                    _base_tensor_fn, s["siteWidth"], s["siteHeight"], grid_step=25,
+                )
             seeds = data.get("hyper_seeds") or list(centers)
-            d_sep = line_spacing
             angle_stop = data.get("angle_stop", 0.3)
+            step_sz = data.get("step_size", 2.0)
+            max_len = data.get("max_length")
+            if max_len is None or max_len <= 0:
+                max_len = max(s["siteWidth"], s["siteHeight"]) * 1.2
             if two_stage:
+                major_d = max(42, min(52, line_spacing * 0.80))
+                minor_d = max(20, min(26, line_spacing * 0.40))
                 hyper_graph, xs, ys = two_stage_street_generation(
                     tensor_fn, s["siteWidth"], s["siteHeight"],
-                    seed_points=seeds, major_d_sep=d_sep, minor_d_sep=d_sep * 0.6, step_size=2.5,
-                    angle_threshold=angle_stop)
+                    seed_points=seeds, major_d_sep=major_d, minor_d_sep=minor_d, step_size=step_sz,
+                    angle_threshold=angle_stop, max_length=max_len)
             else:
+                major_d = max(36, min(46, line_spacing * 0.72))
+                minor_d = max(12, min(18, line_spacing * 0.24))
                 hyper_graph, xs, ys = generate_streets_from_hyperstreamlines(
                     tensor_fn, s["siteWidth"], s["siteHeight"],
-                    seed_points=seeds, d_sep=d_sep, step_size=2.5, angle_threshold=angle_stop)
+                    seed_points=seeds, major_d_sep=major_d, minor_d_sep=minor_d, step_size=step_sz,
+                    angle_threshold=angle_stop, max_length=max_len)
             return {"kind": "hyper_street", "hyper_street_graph": hyper_graph}
         else:
+            # B/C 模式：参数化街道，无需 tensor_fn
             lines, xs, ys = generate_streets_from_tensor_field(
                 s["siteWidth"], s["siteHeight"],
                 basis, centers, blend_factor=blend,
@@ -1259,6 +1421,8 @@ class UrbanFieldGenerator:
             self._generate_after_id = None
         if "lineSpacing" not in self.controls:
             return
+        self._generation_id += 1
+        current_generation_id = self._generation_id
         s = self.state
         basis = s.get("basisType", BASIS_GRID)
         centers = s.get("tensorCenters", self.tensor_centers)
@@ -1266,9 +1430,10 @@ class UrbanFieldGenerator:
             centers = [(s["siteWidth"] / 2, s["siteHeight"] / 2)]
         boundary = self._get_boundary()
         height_gradient_fn = self._get_height_gradient_fn()
-        perlin_str = safe_float(self.controls["perlinStrength"].get(), 0.2) if "perlinStrength" in self.controls else 0.2
+        perlin_str = safe_float(self.controls["perlinStrength"].get(), 0.05) if "perlinStrength" in self.controls else 0.05
 
         data = {
+            "generation_id": current_generation_id,
             "state": dict(s),
             "centers": list(centers),
             "boundary": boundary,
@@ -1283,7 +1448,7 @@ class UrbanFieldGenerator:
         }
         if s.get("runMode") == "D":
             data["hyper_seeds"] = self.hyperstreamline_seeds if self.hyperstreamline_seeds else list(centers)
-            data["step_size"] = safe_float(self.controls["hyperStepSize"].get(), 2.5) if "hyperStepSize" in self.controls else 2.5
+            data["step_size"] = safe_float(self.controls["hyperStepSize"].get(), 2.0) if "hyperStepSize" in self.controls else 2.0
             max_len = safe_float(self.controls["hyperMaxLength"].get(), 0) if "hyperMaxLength" in self.controls else 0
             data["max_length"] = max_len if max_len > 0 else None
             hyper_type = self.controls["hyperType"].get() if "hyperType" in self.controls else HYPERSTREAMLINE_MAJOR
@@ -1291,6 +1456,7 @@ class UrbanFieldGenerator:
             data["use_minor"] = hyper_type in (HYPERSTREAMLINE_MINOR, HYPERSTREAMLINE_BOTH)
         else:
             data["hyper_seeds"] = self.hyperstreamline_seeds if self.hyperstreamline_seeds else list(centers)
+            data["step_size"] = safe_float(self.controls["hyperStepSize"].get(), 2.0) if "hyperStepSize" in self.controls else 2.0
 
         self._show_calculating()
         self._gen_polling = True
@@ -1300,6 +1466,7 @@ class UrbanFieldGenerator:
 
     def draw_result(self, lines_by_curve=None, cross_spacings=None, curve_arrays_by_curve=None,
                     hyperstreamline_mode=False, hyper_street_graph=None, mode_a_data=None):
+        self.canvas.delete("all")
         s = self.state
         cross_spacings = cross_spacings or [s["crossSpacing"]]
         curve_arrays_by_curve = curve_arrays_by_curve or []
@@ -1307,8 +1474,9 @@ class UrbanFieldGenerator:
         self._export_geometry = {"polylines": [], "parcels": []}
 
         pw, ph = s["siteWidth"], s["siteHeight"]
-        self.canvas.create_rectangle(DRAW_PADDING, DRAW_PADDING, DRAW_PADDING + pw, DRAW_PADDING + ph,
-                                     outline="#555555", width=2, dash=(4, 4))
+        x1, y1 = self._pad(0, 0)
+        x2, y2 = self._pad(pw, ph)
+        self.canvas.create_rectangle(x1, y1, x2, y2, outline="#555555", width=2, dash=(4, 4))
         curve_colors = ["#ff6600", "#66ff00", "#0066ff", "#ff00ff", "#00ffff"]
         perp = s.get("roadsPerpendicular", True)
         use_hierarchy = s.get("roadHierarchy", True)
@@ -1579,19 +1747,75 @@ class UrbanFieldGenerator:
             status = "Draw river boundary"
         elif self.brush_draw_mode:
             status = "Draw brush stroke"
+        else:
+            status = status + "\n" + T.get("status_view_hint", "")
         self.status_label.config(text=status)
         self.update_state()
 
     def _reset(self):
-        w, h = safe_float(self.controls["siteWidth"].get(), 1200), safe_float(self.controls["siteHeight"].get(), 200)
+        """重置整个向量场：清除所有点、曲线、边界、种子、视图等"""
+        self._generation_id += 1
+        while True:
+            try:
+                self._gen_queue.get_nowait()
+            except queue.Empty:
+                break
+        self._last_tensor_fn = None
+        self._last_hyper_seeds = None
+        self._export_geometry = {"polylines": [], "parcels": []}
+
+        w = safe_float(self.controls["siteWidth"].get(), 1200)
+        h = safe_float(self.controls["siteHeight"].get(), 200)
+        # 清除所有数据
         self.tensor_centers = [(w / 2, h / 2)]
         self.brush_strokes = []
         self._current_brush_stroke = []
+        self.hyperstreamline_seeds = []
+        self.custom_seed_curves = []
+        self._river_mask_image = None
+        self._height_image = None
+        self._height_gradient_fn = None
+        self.editing_curve_index = -1
+        self._last_applied_result = None
+        # 退出绘制模式
+        if self.draw_mode:
+            self._exit_draw_mode()
+        if self.brush_draw_mode:
+            self.brush_draw_mode = False
+            self._current_brush_stroke = []
+            if "btnDrawBrush" in self.controls and self.controls["btnDrawBrush"].winfo_exists():
+                self.controls["btnDrawBrush"].config(text=BTN_DRAW_BRUSH, bg="#2a4a3a")
+        if self.tensor_center_add_mode:
+            self.tensor_center_add_mode = False
+            if "btnAddCenter" in self.controls and self.controls["btnAddCenter"].winfo_exists():
+                self.controls["btnAddCenter"].config(text=BTN_ADD_CENTER, bg="#2a4a3a")
+        if self.hyperstreamline_seed_mode:
+            self.hyperstreamline_seed_mode = False
+            if "btnAddSeed" in self.controls and self.controls["btnAddSeed"].winfo_exists():
+                self.controls["btnAddSeed"].config(text=BTN_ADD_SEED, bg="#2a4a3a")
+        # 重置视图
+        self._view_zoom = 1.0
+        self._view_cx = w / 2.0
+        self._view_cy = h / 2.0
+        self._pan_start = None
+        # 重置参数
+        self.controls["streetGenMode"].set(STREET_HYPER)
+        self.controls["twoStage"].set(False)
+        self.controls["basisType"].set(BASIS_TYPE_OPTS[0])
+        self._on_basis_change()
+        self.controls["perlinStrength"].set(0.15)
+        self.controls["laplacianSmooth"].set(False)
+        self.controls["smoothIters"].set(3)
+        if "hyperStepSize" in self.controls:
+            self.controls["hyperStepSize"].set(2)
+        if "hyperAngleStop" in self.controls:
+            self.controls["hyperAngleStop"].set(0.3)
         self.controls["lineSpacing"].set(65)
         self.controls["posCount"].delete(0, tk.END)
         self.controls["posCount"].insert(0, "10")
         self.controls["negCount"].delete(0, tk.END)
         self.controls["negCount"].insert(0, "10")
+        self.controls["crossSpacing"].set(80)
         self.controls["noiseEnabled"].set(False)
         if "pMinArea" in self.controls:
             self.controls["pMinArea"].delete(0, tk.END)
@@ -1609,7 +1833,8 @@ class UrbanFieldGenerator:
             self.controls["parcelPerturbation"].set(False)
         if "parcelPerturbationStr" in self.controls:
             self.controls["parcelPerturbationStr"].set(0.02)
-        self.update_state()
+        self.status_label.config(text=T["status_default"] + "\n" + T.get("status_view_hint", ""))
+        self.update_state(immediate=True)
 
     def run(self):
         self.root.mainloop()

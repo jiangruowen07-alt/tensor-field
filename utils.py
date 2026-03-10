@@ -51,11 +51,6 @@ def lerp(a, b, t):
     return a + (b - a) * t
 
 
-def noise(x, y):
-    """简易噪声函数 (Lattice Noise)"""
-    return (math.sin(x * 0.01) * math.cos(y * 0.01) + math.sin(x * 0.02 + y * 0.015)) * 0.5
-
-
 def safe_float(val, default):
     """安全转换为 float"""
     try:

@@ -25,9 +25,12 @@ def curvature_at_index(xs, ys, i):
     x1, y1 = xs[i1], ys[i1]
     x2, y2 = xs[i2], ys[i2]
     cross = (x1 - x0) * (y2 - y1) - (y1 - y0) * (x2 - x1)
-    L1 = math.sqrt((x1 - x0) ** 2 + (y1 - y0) ** 2) or 1e-10
-    L2 = math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2) or 1e-10
-    L3 = math.sqrt((x2 - x0) ** 2 + (y2 - y0) ** 2) or 1e-10
+    dx1, dy1 = x1 - x0, y1 - y0
+    dx2, dy2 = x2 - x1, y2 - y1
+    dx3, dy3 = x2 - x0, y2 - y0
+    L1 = math.sqrt(dx1 * dx1 + dy1 * dy1) or 1e-10
+    L2 = math.sqrt(dx2 * dx2 + dy2 * dy2) or 1e-10
+    L3 = math.sqrt(dx3 * dx3 + dy3 * dy3) or 1e-10
     k = 2 * abs(cross) / (L1 * L2 * L3)
     return min(k * 500, 2.0)  # 归一化到合理范围
 
@@ -36,6 +39,8 @@ def curvature_along_curve(xs, ys):
     """沿曲线采样曲率，返回与 xs 同长的列表"""
     n = len(xs)
     curv = [0.0] * n
+    if n <= 1:
+        return curv
     for i in range(1, n - 1):
         curv[i] = curvature_at_index(xs, ys, i)
     curv[0] = curv[1]
@@ -47,7 +52,8 @@ def attractor_influence(x, y, center_x, center_y, sigma):
     """吸引子影响：越近中心值越高，0~1"""
     if sigma <= 0:
         return 0.0
-    d2 = (x - center_x) ** 2 + (y - center_y) ** 2
+    dx, dy = x - center_x, y - center_y
+    d2 = dx * dx + dy * dy
     return math.exp(-d2 / (2 * sigma * sigma))
 
 
@@ -86,7 +92,7 @@ def adaptive_cross_t_positions(
     根据曲率、吸引子、价值计算自适应横街 t 位置。
     返回 t 值列表，不再等距。
     """
-    if not lines or not xs or not ys:
+    if not lines or not xs or not ys or len(xs) < 2:
         return _fallback_t_positions(base_spacing)
 
     ax = attractor_x if attractor_x is not None else site_width / 2

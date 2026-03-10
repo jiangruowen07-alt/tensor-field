@@ -26,7 +26,8 @@ def polygon_area(pts):
 
 
 def segment_length(p0, p1):
-    return math.sqrt((p1[0] - p0[0]) ** 2 + (p1[1] - p0[1]) ** 2)
+    dx, dy = p1[0] - p0[0], p1[1] - p0[1]
+    return math.sqrt(dx * dx + dy * dy)
 
 
 def polygon_frontage(pts):
