@@ -1,10 +1,13 @@
 """
 张量场 / Tensor Field
 基于论文 "Interactive Procedural Street Modeling" (Chen et al., SIGGRAPH 2008)
-使用 2×2 对称无迹矩阵表示，RBF 加权组合设计元素，支持旋转场。
+使用 2×2 对称无迹矩阵表示，RBF 加权组合设计元素，支持旋转场、笔刷、Laplacian 平滑。
 """
 
 import math
+
+from utils import perlin_noise
+from curve import sample_curve
 
 BASIS_GRID = "grid"
 BASIS_RADIAL = "radial"
@@ -137,6 +140,11 @@ def _rbf_weight(dist_sq, decay):
     return math.exp(-d * dist_sq)
 
 
+def _rbf_weight_fast(dist_sq, d_inv):
+    """RBF 权重，d_inv 已预计算"""
+    return math.exp(-d_inv * dist_sq)
+
+
 def _normalize_centers(centers):
     """centers: list of (x,y) or single (x,y) -> list of (x,y)"""
     if not centers:
@@ -146,16 +154,46 @@ def _normalize_centers(centers):
     return list(centers)
 
 
+def brush_strokes_to_elements(brush_strokes, brush_decay=80):
+    """
+    论文 5.2 笔刷：将用户绘制的曲线转为设计元素。
+    brush_strokes: list of [(x,y), ...] 每条笔刷折线
+    返回设计元素列表
+    """
+    elements = []
+    if not brush_strokes:
+        return elements
+    brush_d_inv = 1.0 / (brush_decay * brush_decay) if brush_decay > 0 else 0.01
+    for stroke in brush_strokes:
+        if len(stroke) < 2:
+            continue
+        sampled = sample_curve(stroke, num_samples=60)
+        n = len(sampled)
+        for i in range(n):
+            x, y = sampled[i][0], sampled[i][1]
+            i0, i1 = max(0, i - 1), min(n - 1, i + 1)
+            dx = sampled[i1][0] - sampled[i0][0]
+            dy = sampled[i1][1] - sampled[i0][1]
+            L = math.sqrt(dx * dx + dy * dy) or 1e-10
+            tx, ty = dx / L, dy / L
+            t = _tensor_from_direction(tx, ty)
+            elements.append({"type": "brush", "pos": (x, y), "tensor_const": t, "weight": 1.0, "rbf_decay": brush_decay, "rbf_d_inv": brush_d_inv})
+    return elements
+
+
 def _build_design_elements(basis, centers, blend_factor,
                           boundary, boundary_decay, boundary_blend,
-                          height_gradient_fn, height_blend):
+                          height_gradient_fn, height_blend,
+                          brush_strokes=None, brush_decay=80):
     """
     从当前 UI 参数构建设计元素列表。
     centers: list of (x,y) 支持多个张量中心
+    brush_strokes: list of [(x,y),...] 笔刷折线，论文 5.2
     每个元素: {"type": str, "pos": (x,y), "tensor_fn": (x,y)->(a,b) or None, "tensor_const": (a,b), "weight": float, "rbf_decay": float}
     """
     elements = []
     decay = boundary_decay if boundary_decay > 0 else _DEFAULT_DECAY
+    decay_sq_inv = 1.0 / (decay * decay) if decay > 0 else 0.01
     centers = _normalize_centers(centers)
     cx0, cy0 = centers[0]  # 首个中心用于 grid/fallback
 
@@ -164,12 +202,16 @@ def _build_design_elements(basis, centers, blend_factor,
         elements.append({"type": "grid", "pos": (cx0, cy0), "tensor_const": t, "weight": 1.0, "rbf_decay": 0})
 
     elif basis == BASIS_RADIAL:
+        # 径向基底：副特征向量指向中心，所有副超流线汇聚于中心导致团状。
+        # 混入少量网格分量（约 18%）打破完美径向，使街道分散。
+        t_grid = _tensor_from_direction(1.0, 0.0)
+        elements.append({"type": "grid", "pos": (cx0, cy0), "tensor_const": t_grid, "weight": 0.18, "rbf_decay": 0})
         for cx, cy in centers:
             def radial_fn(px, py, cxx=cx, cyy=cy):
                 dx = px - cxx
                 dy = py - cyy
                 return _tensor_radial(dx, dy)
-            elements.append({"type": "radial", "pos": (cx, cy), "tensor_fn": radial_fn, "weight": 1.0, "rbf_decay": decay})
+            elements.append({"type": "radial", "pos": (cx, cy), "tensor_fn": radial_fn, "weight": 1.0, "rbf_decay": decay, "rbf_d_inv": decay_sq_inv})
 
     elif basis == BASIS_BLEND:
         bf = max(0, min(1, blend_factor))
@@ -180,13 +222,13 @@ def _build_design_elements(basis, centers, blend_factor,
                 dx = px - cxx
                 dy = py - cyy
                 return _tensor_radial(dx, dy)
-            elements.append({"type": "radial", "pos": (cx, cy), "tensor_fn": radial_fn, "weight": bf, "rbf_decay": decay})
+            elements.append({"type": "radial", "pos": (cx, cy), "tensor_fn": radial_fn, "weight": bf, "rbf_decay": decay, "rbf_d_inv": decay_sq_inv})
 
     elif basis == BASIS_BOUNDARY:
         if boundary:
             for bx, by, tx, ty in boundary:
                 t = _tensor_from_direction(tx, ty)
-                elements.append({"type": "boundary", "pos": (bx, by), "tensor_const": t, "weight": 1.0, "rbf_decay": decay})
+                elements.append({"type": "boundary", "pos": (bx, by), "tensor_const": t, "weight": 1.0, "rbf_decay": decay, "rbf_d_inv": decay_sq_inv})
         if not elements:
             t = _tensor_from_direction(1.0, 0.0)
             elements.append({"type": "grid", "pos": (cx0, cy0), "tensor_const": t, "weight": 1.0, "rbf_decay": 0})
@@ -198,7 +240,7 @@ def _build_design_elements(basis, centers, blend_factor,
         if boundary:
             for bx, by, tx, ty in boundary:
                 t = _tensor_from_direction(tx, ty)
-                elements.append({"type": "boundary", "pos": (bx, by), "tensor_const": t, "weight": bb, "rbf_decay": decay})
+                elements.append({"type": "boundary", "pos": (bx, by), "tensor_const": t, "weight": bb, "rbf_decay": decay, "rbf_d_inv": decay_sq_inv})
 
     elif basis == BASIS_HEIGHT:
         if height_gradient_fn:
@@ -224,6 +266,10 @@ def _build_design_elements(basis, centers, blend_factor,
         t = _tensor_from_direction(1.0, 0.0)
         elements.append({"type": "grid", "pos": (cx0, cy0), "tensor_const": t, "weight": 1.0, "rbf_decay": 0})
 
+    # 论文 5.2 笔刷：叠加笔刷设计元素
+    if brush_strokes:
+        elements.extend(brush_strokes_to_elements(brush_strokes, brush_decay))
+
     return elements
 
 
@@ -237,8 +283,10 @@ def _compute_tensor_at(x, y, elements):
 
     for el in elements:
         px, py = el["pos"]
-        dist_sq = (x - px) ** 2 + (y - py) ** 2
-        rbf = 1.0 if el["rbf_decay"] <= 0 else _rbf_weight(dist_sq, el["rbf_decay"])
+        dx = x - px
+        dy = y - py
+        dist_sq = dx * dx + dy * dy
+        rbf = 1.0 if el["rbf_decay"] <= 0 else _rbf_weight_fast(dist_sq, el["rbf_d_inv"])
         w = el["weight"] * rbf
         if w < 1e-6:
             continue
@@ -261,30 +309,77 @@ def _compute_tensor_at(x, y, elements):
     return total_a, total_b
 
 
-def tensor_field_at(x, y, basis, centers, blend_factor=0.5,
-                    boundary=None, boundary_decay=150, boundary_blend=0.5,
-                    height_gradient_fn=None, height_blend=0.5,
-                    r1=0, r2=0, r3=0):
+def _perlin_rotation_at(x, y, scale, strength, which="r1"):
+    """论文 5.3：Perlin 噪声生成旋转场，范围 [-π/2, π/2] * strength"""
+    n = perlin_noise(x, y, scale=scale)
+    angle = n * strength * (math.pi / 2)
+    return angle
+
+
+def create_tensor_field_fn(basis, centers, blend_factor=0.5,
+                           boundary=None, boundary_decay=150, boundary_blend=0.5,
+                           height_gradient_fn=None, height_blend=0.5,
+                           brush_strokes=None, brush_decay=80,
+                           perlin_rotation_scale=0.005, perlin_rotation_strength=0,
+                           perlin_r1=True, perlin_r2=False, perlin_r3=False):
     """
-    在 (x, y) 处计算张量场，返回两组互相垂直的单位方向。
-    采用论文逻辑：2×2 对称无迹矩阵 + RBF 组合 + 可选旋转场。
-
-    Args:
-        centers: list of (x,y) 张量中心，支持多个；或 (center_x, center_y) 单中心
-        boundary: list of (x, y, tx, ty) from extract_boundary_from_curve
-        boundary_decay: 边界 RBF 衰减距离
-        boundary_blend: boundary_blend 模式下与 grid 的混合 (0=纯grid, 1=纯boundary)
-        height_gradient_fn: callable (x,y)->(gx,gy) 用于 height/height_blend 基底
-        height_blend: height_blend 模式下与 grid 的混合 (0=纯grid, 1=纯height)
-        r1, r2, r3: 旋转场弧度，默认 0
-
-    Returns:
-        (ux, uy, vx, vy): u 和 v 为互相垂直的单位向量
+    创建带缓存设计元素的张量场函数，避免每点重建 elements。
+    返回 (x, y) -> (ux, uy, vx, vy)
     """
     elements = _build_design_elements(
         basis, centers, blend_factor,
         boundary, boundary_decay, boundary_blend,
         height_gradient_fn, height_blend,
+        brush_strokes=brush_strokes, brush_decay=brush_decay,
+    )
+    half_pi = math.pi / 2
+    pscale = perlin_rotation_scale
+    pstr = perlin_rotation_strength
+
+    def fn(x, y):
+        t = _compute_tensor_at(x, y, elements)
+        if t is None:
+            return 1.0, 0.0, 0.0, 1.0
+        uv = _tensor_to_eigenvectors(t[0], t[1])
+        if uv is None:
+            return 1.0, 0.0, 0.0, 1.0
+        ux, uy, vx, vy = uv
+        pr1 = pr2 = pr3 = 0.0
+        if pstr > 0:
+            if perlin_r1:
+                pr1 = perlin_noise(x, y, scale=pscale) * pstr * half_pi
+            if perlin_r2:
+                pr2 = perlin_noise(x, y + 1000, scale=pscale) * pstr * half_pi
+            if perlin_r3:
+                pr3 = perlin_noise(x + 500, y, scale=pscale) * pstr * half_pi
+        ux, uy, vx, vy = _apply_rotation(ux, uy, vx, vy, pr1, pr2, pr3)
+        return ux, uy, vx, vy
+
+    return fn
+
+
+def tensor_field_at(x, y, basis, centers, blend_factor=0.5,
+                    boundary=None, boundary_decay=150, boundary_blend=0.5,
+                    height_gradient_fn=None, height_blend=0.5,
+                    r1=0, r2=0, r3=0,
+                    brush_strokes=None, brush_decay=80,
+                    perlin_rotation_scale=0.005, perlin_rotation_strength=0,
+                    perlin_r1=True, perlin_r2=False, perlin_r3=False):
+    """
+    在 (x, y) 处计算张量场，返回两组互相垂直的单位方向。
+    采用论文逻辑：2×2 对称无迹矩阵 + RBF 组合 + 可选旋转场 + 笔刷 + Perlin 噪声。
+
+    Args:
+        brush_strokes: list of [(x,y),...] 笔刷折线
+        perlin_rotation_scale: Perlin 空间尺度
+        perlin_rotation_strength: 旋转强度 [0,1]，0 表示关闭
+        perlin_r1/r2/r3: 是否对 R1/R2/R3 应用 Perlin
+    """
+    elements = _build_design_elements(
+        basis, centers, blend_factor,
+        boundary, boundary_decay, boundary_blend,
+        height_gradient_fn, height_blend,
+        brush_strokes=brush_strokes, brush_decay=brush_decay,
     )
     t = _compute_tensor_at(x, y, elements)
     if t is None:
@@ -293,29 +388,110 @@ def tensor_field_at(x, y, basis, centers, blend_factor=0.5,
     if uv is None:
         return 1.0, 0.0, 0.0, 1.0
     ux, uy, vx, vy = uv
-    ux, uy, vx, vy = _apply_rotation(ux, uy, vx, vy, r1, r2, r3)
+
+    # 论文 5.3 Perlin 旋转
+    pr1, pr2, pr3 = r1, r2, r3
+    if perlin_rotation_strength > 0:
+        if perlin_r1:
+            pr1 += _perlin_rotation_at(x, y, perlin_rotation_scale, perlin_rotation_strength, "r1")
+        if perlin_r2:
+            pr2 += _perlin_rotation_at(x, y, perlin_rotation_scale, perlin_rotation_strength, "r2")
+        if perlin_r3:
+            pr3 += _perlin_rotation_at(x, y, perlin_rotation_scale, perlin_rotation_strength, "r3")
+    ux, uy, vx, vy = _apply_rotation(ux, uy, vx, vy, pr1, pr2, pr3)
     return ux, uy, vx, vy
+
+
+def laplacian_smooth_tensor_grid(grid_a, grid_b, nx, ny, iterations=3):
+    """
+    论文 5.2：对网格上的张量场做 Laplacian 平滑。
+    双缓冲避免每轮深拷贝，*0.25 替代 /4
+    """
+    if iterations <= 0:
+        return grid_a, grid_b
+    # 双缓冲
+    buf_a = [row[:] for row in grid_a]
+    buf_b = [row[:] for row in grid_b]
+    src_a, src_b = grid_a, grid_b
+    dst_a, dst_b = buf_a, buf_b
+    q = 0.25
+    for _ in range(iterations):
+        for j in range(1, ny - 1):
+            for i in range(1, nx - 1):
+                dst_a[j][i] = (src_a[j-1][i] + src_a[j+1][i] + src_a[j][i-1] + src_a[j][i+1]) * q
+                dst_b[j][i] = (src_b[j-1][i] + src_b[j+1][i] + src_b[j][i-1] + src_b[j][i+1]) * q
+        src_a, dst_a = dst_a, src_a
+        src_b, dst_b = dst_b, src_b
+    return src_a, src_b
+
+
+def create_smoothed_tensor_fn(tensor_fn, site_width, site_height, grid_step=20, smooth_iterations=3):
+    """
+    创建经过 Laplacian 平滑的张量场采样函数。
+    在网格上采样、平滑、双线性插值。
+    """
+    nx = max(2, int(site_width / grid_step) + 1)
+    ny = max(2, int(site_height / grid_step) + 1)
+    inv_nx = 1.0 / max(nx - 1, 1)
+    inv_ny = 1.0 / max(ny - 1, 1)
+    grid_a = [[0.0] * nx for _ in range(ny)]
+    grid_b = [[0.0] * nx for _ in range(ny)]
+    for j in range(ny):
+        for i in range(nx):
+            x = i * inv_nx * site_width
+            y = j * inv_ny * site_height
+            ux, uy, vx, vy = tensor_fn(x, y)
+            theta = math.atan2(uy, ux)
+            theta2 = 2 * theta
+            grid_a[j][i] = math.cos(theta2)
+            grid_b[j][i] = math.sin(theta2)
+    grid_a, grid_b = laplacian_smooth_tensor_grid(grid_a, grid_b, nx, ny, smooth_iterations)
+
+    inv_w = 1.0 / site_width if site_width > 0 else 0
+    inv_h = 1.0 / site_height if site_height > 0 else 0
+    nx1 = nx - 1
+    ny1 = ny - 1
+
+    def smoothed_fn(x, y):
+        xi = x * inv_w * nx1
+        yi = y * inv_h * ny1
+        i0 = max(0, min(nx - 2, int(xi)))
+        j0 = max(0, min(ny - 2, int(yi)))
+        u = xi - i0
+        v = yi - j0
+        omu, omv = 1 - u, 1 - v
+        a = omu * omv * grid_a[j0][i0] + omu * v * grid_a[j0+1][i0] + u * omv * grid_a[j0][i0+1] + u * v * grid_a[j0+1][i0+1]
+        b = omu * omv * grid_b[j0][i0] + omu * v * grid_b[j0+1][i0] + u * omv * grid_b[j0][i0+1] + u * v * grid_b[j0+1][i0+1]
+        return _tensor_to_eigenvectors(a, b) or (1.0, 0.0, 0.0, 1.0)
+
+    return smoothed_fn
 
 
 def sample_tensor_field_grid(site_width, site_height, basis, centers,
                              blend_factor=0.5, grid_step=25,
                              boundary=None, boundary_decay=150, boundary_blend=0.5,
-                             height_gradient_fn=None, height_blend=0.5):
+                             height_gradient_fn=None, height_blend=0.5,
+                             brush_strokes=None, brush_decay=80,
+                             perlin_rotation_scale=0.005, perlin_rotation_strength=0):
     """
     在场地内均匀采样张量场，返回 (x, y, ux, uy, vx, vy) 列表。
-    centers: list of (x,y) 或 (center_x, center_y)
+    使用缓存的 design elements 加速。
     """
+    tensor_fn = create_tensor_field_fn(
+        basis, centers, blend_factor,
+        boundary=boundary, boundary_decay=boundary_decay, boundary_blend=boundary_blend,
+        height_gradient_fn=height_gradient_fn, height_blend=height_blend,
+        brush_strokes=brush_strokes, brush_decay=brush_decay,
+        perlin_rotation_scale=perlin_rotation_scale,
+        perlin_rotation_strength=perlin_rotation_strength,
+    )
     samples = []
-    x = grid_step / 2
+    half_step = grid_step * 0.5
+    x = half_step
     while x < site_width:
-        y = grid_step / 2
+        y = half_step
         while y < site_height:
-            ux, uy, vx, vy = tensor_field_at(
-                x, y, basis, centers, blend_factor,
-                boundary=boundary, boundary_decay=boundary_decay,
-                boundary_blend=boundary_blend,
-                height_gradient_fn=height_gradient_fn, height_blend=height_blend,
-            )
+            ux, uy, vx, vy = tensor_fn(x, y)
             samples.append((x, y, ux, uy, vx, vy))
             y += grid_step
         x += grid_step

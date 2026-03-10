@@ -7,6 +7,8 @@ import tkinter as tk
 from tkinter import ttk, filedialog
 import math
 import random
+import threading
+import queue
 
 from config import T_COUNT, T_STEP, DRAW_PADDING
 from utils import safe_float, safe_int
@@ -35,11 +37,15 @@ from i18n import PARCEL_FRONTAGE_BASED, PARCEL_BLOCK_BY_BLOCK, PARCEL_CORNER_SEP
 from i18n import PARCEL_PERTURBATION_STR
 from i18n import HYPERSTREAMLINE_TITLE, HYPERSTREAMLINE_MAJOR, HYPERSTREAMLINE_MINOR, HYPERSTREAMLINE_BOTH
 from i18n import BTN_ADD_SEED, BTN_CLEAR_SEEDS, HYPER_STEP_SIZE, HYPER_MAX_LENGTH, HYPER_ANGLE_STOP
+from i18n import PAPER_OPTIONS, STREET_GEN_MODE, STREET_PARAM, STREET_HYPER, TWO_STAGE
+from i18n import PERLIN_ROTATION, PERLIN_STRENGTH, LAPLACIAN_SMOOTH, LAPLACIAN_ITERS
+from i18n import BTN_DRAW_BRUSH, BTN_CLEAR_BRUSH, BRUSH_HINT
 from parcel_subdivision import subdivide_blocks, rule_based_parcels
 from tensor_field import (
     sample_tensor_field_grid,
     generate_streets_from_tensor_field,
-    tensor_field_at,
+    create_tensor_field_fn,
+    create_smoothed_tensor_fn,
     BASIS_GRID,
     BASIS_RADIAL,
     BASIS_BLEND,
@@ -47,6 +53,10 @@ from tensor_field import (
     BASIS_BOUNDARY_BLEND,
     BASIS_HEIGHT,
     BASIS_HEIGHT_BLEND,
+)
+from street_from_hyperstreamlines import (
+    generate_streets_from_hyperstreamlines,
+    two_stage_street_generation,
 )
 from boundary_field import extract_boundary_from_curve, extract_boundary_from_image
 from height_field import build_height_field_from_image
@@ -74,13 +84,19 @@ class UrbanFieldGenerator:
         self._curve_list_frame = None
         self._export_geometry = {"polylines": [], "parcels": []}
         self._generate_after_id = None
-        self._debounce_ms = 120
+        self._debounce_ms = 280
+        self._gen_queue = queue.Queue()
+        self._gen_thread = None
+        self._gen_polling = False
         self._river_mask_image = None
         self._height_image = None
         self._height_gradient_fn = None
         self.hyperstreamline_seeds = []
         self.hyperstreamline_seed_mode = False
-        self.tensor_centers = [(600, 100)]  # list of (x,y), support multiple centers
+        self.tensor_centers = [(600, 100)]
+        self.brush_strokes = []
+        self.brush_draw_mode = False
+        self._current_brush_stroke = []
 
         self._build_ui()
         self._bind_events()
@@ -199,12 +215,48 @@ class UrbanFieldGenerator:
         self._label_group(panel, TENSOR_CENTER_HINT, "", t_key="tensor_center_hint")
         tk.Label(panel, text="", bg="#141414", font=("Inter", 4)).pack()
 
+        self._section_labels.append(self._section_title(panel, PAPER_OPTIONS))
+        self._label_group(panel, STREET_GEN_MODE, t_key="street_gen_mode")
+        self.controls["streetGenMode"] = ttk.Combobox(panel, values=[STREET_PARAM, STREET_HYPER], state="readonly", width=24)
+        self.controls["streetGenMode"].set(STREET_PARAM)
+        self.controls["streetGenMode"].pack(fill=tk.X, pady=(0, 4))
+        self.controls["twoStage"] = tk.BooleanVar(value=False)
+        tk.Checkbutton(panel, text=TWO_STAGE, variable=self.controls["twoStage"], command=self.update_state,
+                      bg="#141414", fg="#e0e0e0", selectcolor="#1a1a1a", activebackground="#141414",
+                      activeforeground="#e0e0e0", font=("Inter", 9)).pack(anchor="w", pady=(0, 4))
+        self._label_group(panel, PERLIN_ROTATION, "0.2", right_key="perlinStrVal", t_key="perlin_strength")
+        self.controls["perlinStrength"] = tk.Scale(panel, from_=0, to=1, resolution=0.05, orient=tk.HORIZONTAL,
+                                                  bg="#141414", fg="#e0e0e0", troughcolor="#2a2a2a",
+                                                  highlightthickness=0, showvalue=False, command=lambda v: self.update_state())
+        self.controls["perlinStrength"].set(0.2)
+        self.controls["perlinStrength"].pack(fill=tk.X, pady=(0, 4))
+        self.controls["laplacianSmooth"] = tk.BooleanVar(value=False)
+        tk.Checkbutton(panel, text=LAPLACIAN_SMOOTH, variable=self.controls["laplacianSmooth"], command=self.update_state,
+                      bg="#141414", fg="#e0e0e0", selectcolor="#1a1a1a", activebackground="#141414",
+                      activeforeground="#e0e0e0", font=("Inter", 9)).pack(anchor="w", pady=(0, 4))
+        self._label_group(panel, LAPLACIAN_ITERS, "3", right_key="smoothItersVal", t_key="smooth_iters")
+        self.controls["smoothIters"] = tk.Scale(panel, from_=1, to=10, orient=tk.HORIZONTAL,
+                                                bg="#141414", fg="#e0e0e0", troughcolor="#2a2a2a",
+                                                highlightthickness=0, showvalue=False, command=lambda v: self.update_state())
+        self.controls["smoothIters"].set(3)
+        self.controls["smoothIters"].pack(fill=tk.X, pady=(0, 4))
+        brush_row = tk.Frame(panel, bg="#141414")
+        brush_row.pack(fill=tk.X, pady=(0, 4))
+        self.controls["btnDrawBrush"] = tk.Button(brush_row, text=BTN_DRAW_BRUSH, command=self._toggle_brush_mode,
+                                                  bg="#2a4a3a", fg="#e0e0e0", relief=tk.SOLID, bd=1, font=("JetBrains Mono", 9))
+        self.controls["btnDrawBrush"].pack(side=tk.LEFT, padx=(0, 4))
+        self.controls["btnClearBrush"] = tk.Button(brush_row, text=BTN_CLEAR_BRUSH, command=self._clear_brush,
+                                                    bg="#2a2a2a", fg="#e0e0e0", relief=tk.SOLID, bd=1, font=("JetBrains Mono", 9))
+        self.controls["btnClearBrush"].pack(side=tk.LEFT)
+        self._label_group(panel, BRUSH_HINT, "", t_key="brush_hint")
+        tk.Label(panel, text="", bg="#141414", font=("Inter", 4)).pack()
+
         self._section_labels.append(self._section_title(panel, T["section_expansion"]))
-        self._label_group(panel, T["line_spacing"], "40", right_key="spacingVal", t_key="line_spacing")
-        self.controls["lineSpacing"] = tk.Scale(panel, from_=10, to=100, orient=tk.HORIZONTAL,
+        self._label_group(panel, T["line_spacing"], "65", right_key="spacingVal", t_key="line_spacing")
+        self.controls["lineSpacing"] = tk.Scale(panel, from_=20, to=120, orient=tk.HORIZONTAL,
                                                 bg="#141414", fg="#e0e0e0", troughcolor="#2a2a2a",
                                                 highlightthickness=0, showvalue=False)
-        self.controls["lineSpacing"].set(40)
+        self.controls["lineSpacing"].set(65)
         self.controls["lineSpacing"].pack(fill=tk.X, pady=(0, 10))
 
         self._label_group(panel, T["pos_count"], t_key="pos_count")
@@ -570,11 +622,11 @@ class UrbanFieldGenerator:
                                                    insertbackground="#e0e0e0", relief=tk.SOLID, bd=1, width=8)
         self.controls["hyperMaxLength"].insert(0, "0")
         self.controls["hyperMaxLength"].pack(fill=tk.X, pady=(0, 4))
-        self._label_group(self._hyperstreamline_frame, HYPER_ANGLE_STOP, "0.5", right_key="hyperAngleVal", t_key="hyper_angle")
-        self.controls["hyperAngleStop"] = tk.Scale(self._hyperstreamline_frame, from_=0, to=1, resolution=0.1, orient=tk.HORIZONTAL,
+        self._label_group(self._hyperstreamline_frame, HYPER_ANGLE_STOP, "0.3", right_key="hyperAngleVal", t_key="hyper_angle")
+        self.controls["hyperAngleStop"] = tk.Scale(self._hyperstreamline_frame, from_=0.1, to=1, resolution=0.05, orient=tk.HORIZONTAL,
                                                    bg="#141414", fg="#e0e0e0", troughcolor="#2a2a2a",
                                                    highlightthickness=0, showvalue=False)
-        self.controls["hyperAngleStop"].set(0.5)
+        self.controls["hyperAngleStop"].set(0.3)
         self.controls["hyperAngleStop"].pack(fill=tk.X, pady=(0, 8))
         self._bind_recursive(self._hyperstreamline_frame, self.update_state)
 
@@ -672,6 +724,27 @@ class UrbanFieldGenerator:
         self.tensor_centers = [(w / 2, h / 2)]
         self.update_state()
 
+    def _toggle_brush_mode(self):
+        self.brush_draw_mode = not self.brush_draw_mode
+        if self.brush_draw_mode:
+            self._current_brush_stroke = []
+            if "btnDrawBrush" in self.controls:
+                self.controls["btnDrawBrush"].config(text=BTN_DONE_DRAWING, bg="#3a5a3a")
+            self.status_label.config(text="Draw brush: click to add points")
+        else:
+            if len(self._current_brush_stroke) >= 2:
+                self.brush_strokes.append(list(self._current_brush_stroke))
+            self._current_brush_stroke = []
+            if "btnDrawBrush" in self.controls:
+                self.controls["btnDrawBrush"].config(text=BTN_DRAW_BRUSH, bg="#2a4a3a")
+            self.status_label.config(text=T["status_default"])
+        self.update_state()
+
+    def _clear_brush(self):
+        self.brush_strokes = []
+        self._current_brush_stroke = []
+        self.update_state()
+
     def _update_boundary_labels(self):
         if "boundaryDecayVal" in self.controls and "boundaryDecay" in self.controls:
             self.controls["boundaryDecayVal"].config(text=str(int(self.controls["boundaryDecay"].get())))
@@ -709,7 +782,7 @@ class UrbanFieldGenerator:
     def _get_curve_params_defaults(self):
         return {
             "fieldType": self._get_field_type(),
-            "lineSpacing": safe_float(self.controls["lineSpacing"].get(), 40),
+            "lineSpacing": safe_float(self.controls["lineSpacing"].get(), 65),
             "posCount": safe_int(self.controls["posCount"].get(), 10),
             "negCount": safe_int(self.controls["negCount"].get(), 10),
             "spacingMode": self._get_spacing_mode(),
@@ -797,6 +870,11 @@ class UrbanFieldGenerator:
                 self.tensor_centers.append((lx, ly))
                 self.update_state()
             return
+        if self.brush_draw_mode:
+            if 0 <= lx <= w and 0 <= ly <= h:
+                self._current_brush_stroke.append((lx, ly))
+                self.update_state()
+            return
         if self.hyperstreamline_seed_mode and self._get_run_mode() == "D":
             if 0 <= lx <= w and 0 <= ly <= h:
                 self.hyperstreamline_seeds.append((lx, ly))
@@ -857,7 +935,17 @@ class UrbanFieldGenerator:
         self.state["siteWidth"] = safe_float(self.controls["siteWidth"].get(), 1200)
         self.state["siteHeight"] = safe_float(self.controls["siteHeight"].get(), 200)
         self.state["tensorCenters"] = list(self.tensor_centers)
-        self.state["lineSpacing"] = safe_float(self.controls["lineSpacing"].get(), 40)
+        self.state["brushStrokes"] = [list(s) for s in self.brush_strokes]
+        try:
+            self.state["streetGenMode"] = self.controls["streetGenMode"].get() if "streetGenMode" in self.controls else STREET_PARAM
+            self.state["twoStage"] = self.controls["twoStage"].get() if "twoStage" in self.controls else False
+        except Exception:
+            self.state["streetGenMode"] = STREET_PARAM
+            self.state["twoStage"] = False
+        self.state["perlinStrength"] = safe_float(self.controls["perlinStrength"].get(), 0.2) if "perlinStrength" in self.controls else 0
+        self.state["laplacianSmooth"] = self.controls["laplacianSmooth"].get() if "laplacianSmooth" in self.controls else False
+        self.state["smoothIters"] = safe_int(self.controls["smoothIters"].get(), 3) if "smoothIters" in self.controls else 3
+        self.state["lineSpacing"] = safe_float(self.controls["lineSpacing"].get(), 65)
         self.state["posCount"] = safe_int(self.controls["posCount"].get(), 10)
         self.state["negCount"] = safe_int(self.controls["negCount"].get(), 10)
         self.state["spacingMode"] = self._get_spacing_mode()
@@ -982,75 +1070,240 @@ class UrbanFieldGenerator:
             dash = (4, 4) if (kind == "outside" and dashed_outside) else ()
             self.canvas.create_line(ax, ay, bx, by, fill=fill, width=width, dash=dash)
 
-    def generate(self):
-        if self._generate_after_id:
-            self.root.after_cancel(self._generate_after_id)
-            self._generate_after_id = None
-        self.canvas.delete("all")
+    def _draw_hyper_street_graph(self, graph):
+        """B/C + use_hyper: 直接绘制 graph edges，不调用 sorted_lines/classify/get_line_at_t/adaptive_cross"""
+        main_color, main_w = "#e0e0e0", 2
+        edge_pts = graph.get("edge_pts", [])
+        for pts in edge_pts:
+            if len(pts) >= 2:
+                self._export_geometry["polylines"].append(pts)
+                for i in range(len(pts) - 1):
+                    self._draw_line_segment(pts[i], pts[i + 1], main_color, main_w)
         s = self.state
         basis = s.get("basisType", BASIS_GRID)
-        centers = s.get("tensorCenters", self.tensor_centers)
-        if not centers:
-            centers = [(s["siteWidth"] / 2, s["siteHeight"] / 2)]
+        if basis in (BASIS_RADIAL, BASIS_BLEND, BASIS_BOUNDARY, BASIS_BOUNDARY_BLEND):
+            centers_draw = s.get("tensorCenters", self.tensor_centers)
+            if not centers_draw:
+                centers_draw = [(s["siteWidth"] / 2, s["siteHeight"] / 2)]
+            for cx, cy in centers_draw:
+                px, py = self._pad(cx, cy)
+                self.canvas.create_oval(px - 8, py - 8, px + 8, py + 8, fill="#ff6600", outline="#ffffff", width=2)
+
+    def _show_calculating(self):
+        """在画布上显示计算中提示"""
+        pw, ph = self.state.get("siteWidth", 1200), self.state.get("siteHeight", 200)
+        self.canvas.delete("all")
+        self.canvas.create_rectangle(DRAW_PADDING, DRAW_PADDING, DRAW_PADDING + pw, DRAW_PADDING + ph,
+                                     outline="#555555", width=2, dash=(4, 4))
+        cx, cy = DRAW_PADDING + pw / 2, DRAW_PADDING + ph / 2
+        self.canvas.create_text(cx, cy, text="Calculating...", fill="#888888", font=("Inter", 14))
+        self.canvas.update_idletasks()
+
+    def _apply_gen_result(self, result):
+        """在主线程应用生成结果"""
+        if result is None:
+            return
+        if result.get("kind") == "error":
+            self.canvas.delete("all")
+            pw, ph = self.state.get("siteWidth", 1200), self.state.get("siteHeight", 200)
+            self.canvas.create_rectangle(DRAW_PADDING, DRAW_PADDING, DRAW_PADDING + pw, DRAW_PADDING + ph,
+                                         outline="#555555", width=2, dash=(4, 4))
+            cx, cy = DRAW_PADDING + pw / 2, DRAW_PADDING + ph / 2
+            self.canvas.create_text(cx, cy, text="Error: " + result.get("msg", "?"), fill="#cc6666", font=("Inter", 10))
+            return
+        kind = result.get("kind")
+        if kind == "D":
+            self.draw_result(lines_by_curve=result["lines_by_curve"], hyperstreamline_mode=True)
+        elif kind == "hyper_street":
+            self.draw_result(hyper_street_graph=result["hyper_street_graph"])
+        elif kind == "B":
+            self.draw_result(
+                lines_by_curve=result["lines_by_curve"],
+                cross_spacings=result["cross_spacings"],
+                curve_arrays_by_curve=result["curve_arrays_by_curve"],
+            )
+        elif kind == "A":
+            self.draw_result(mode_a_data=result["mode_a_data"])
+
+    def _poll_gen_queue(self):
+        """轮询后台生成结果"""
+        if not self._gen_polling:
+            return
+        try:
+            result = self._gen_queue.get_nowait()
+            self._gen_polling = False
+            self._apply_gen_result(result)
+            return
+        except queue.Empty:
+            pass
+        self.root.after(80, self._poll_gen_queue)
+
+    def _run_generate_worker(self, data):
+        """后台线程执行的重计算逻辑"""
+        try:
+            result = self._do_generate(data)
+            self._gen_queue.put(result)
+        except Exception as e:
+            self._gen_queue.put({"kind": "error", "msg": str(e)})
+
+    def _do_generate(self, data):
+        """纯计算逻辑，可在线程中运行。data 为预捕获的参数字典"""
+        s = data["state"]
+        basis = s.get("basisType", BASIS_GRID)
+        centers = data["centers"]
         blend = s.get("basisBlendFactor", 0.5)
-        boundary = self._get_boundary()
+        boundary = data["boundary"]
         boundary_decay = s.get("boundaryDecay", 150)
         boundary_blend = s.get("boundaryBlendFactor", 0.5)
-        height_gradient_fn = self._get_height_gradient_fn()
+        height_gradient_fn = data["height_gradient_fn"]
         height_blend = s.get("heightBlendFactor", 0.5)
+        perlin_str = data["perlin_str"]
+        brush_strokes = data["brush_strokes"]
+
+        if s.get("runMode") == "A":
+            samples = sample_tensor_field_grid(
+                s["siteWidth"], s["siteHeight"],
+                basis, centers, blend_factor=blend, grid_step=40,
+                boundary=boundary, boundary_decay=boundary_decay, boundary_blend=boundary_blend,
+                height_gradient_fn=height_gradient_fn, height_blend=height_blend,
+                brush_strokes=brush_strokes, brush_decay=80,
+                perlin_rotation_scale=0.005, perlin_rotation_strength=perlin_str,
+            )
+            return {"kind": "A", "mode_a_data": {"samples": samples, "basis": basis, "centers": centers, "brush_strokes": brush_strokes}}
+
+        _base_tensor_fn = create_tensor_field_fn(
+            basis, centers, blend,
+            boundary=boundary, boundary_decay=boundary_decay, boundary_blend=boundary_blend,
+            height_gradient_fn=height_gradient_fn, height_blend=height_blend,
+            brush_strokes=brush_strokes, brush_decay=80,
+            perlin_rotation_scale=0.005, perlin_rotation_strength=perlin_str,
+            perlin_r1=True, perlin_r2=False, perlin_r3=False,
+        )
 
         if s.get("runMode") == "D":
-            def tensor_fn(x, y):
-                return tensor_field_at(x, y, basis, centers, blend,
-                    boundary=boundary, boundary_decay=boundary_decay, boundary_blend=boundary_blend,
-                    height_gradient_fn=height_gradient_fn, height_blend=height_blend)
-            seeds = self.hyperstreamline_seeds if self.hyperstreamline_seeds else list(centers)
-            step_size = safe_float(self.controls["hyperStepSize"].get(), 2) if "hyperStepSize" in self.controls else 2
-            max_len = safe_float(self.controls["hyperMaxLength"].get(), 0) if "hyperMaxLength" in self.controls else 0
-            max_length = max_len if max_len > 0 else None
-            angle_stop = safe_float(self.controls["hyperAngleStop"].get(), 0.5) if "hyperAngleStop" in self.controls else 0.5
-            hyper_type = self.controls["hyperType"].get() if "hyperType" in self.controls else HYPERSTREAMLINE_MAJOR
-            use_major = hyper_type in (HYPERSTREAMLINE_MAJOR, HYPERSTREAMLINE_BOTH)
-            use_minor = hyper_type in (HYPERSTREAMLINE_MINOR, HYPERSTREAMLINE_BOTH)
+            tensor_fn = _base_tensor_fn
+            if data.get("laplacian_smooth"):
+                tensor_fn = create_smoothed_tensor_fn(
+                    _base_tensor_fn, s["siteWidth"], s["siteHeight"],
+                    grid_step=30, smooth_iterations=data.get("smooth_iters", 2),
+                )
+            seeds = data["hyper_seeds"]
+            step_size = data.get("step_size", 2.5)
+            max_length = data.get("max_length")
+            angle_stop = data.get("angle_stop", 0.3)
+            use_major = data.get("use_major", True)
+            use_minor = data.get("use_minor", False)
             bounds = (0, 0, s["siteWidth"], s["siteHeight"])
             lines_by_curve = []
             if use_major:
                 major_lines = integrate_hyperstreamlines_from_seeds(
                     tensor_fn, seeds, use_major=True, step_size=step_size,
-                    max_length=max_length, bounds=bounds, angle_threshold=angle_stop)
+                    max_length=max_length, bounds=bounds, angle_threshold=angle_stop, max_steps=220)
                 lines_by_curve.extend(major_lines)
             if use_minor:
                 minor_lines = integrate_hyperstreamlines_from_seeds(
                     tensor_fn, seeds, use_major=False, step_size=step_size,
-                    max_length=max_length, bounds=bounds, angle_threshold=angle_stop)
+                    max_length=max_length, bounds=bounds, angle_threshold=angle_stop, max_steps=220)
                 lines_by_curve.extend(minor_lines)
             if not lines_by_curve:
                 lines_by_curve = [[]]
-            self.draw_result(lines_by_curve, hyperstreamline_mode=True)
-            return
+            return {"kind": "D", "lines_by_curve": lines_by_curve}
 
-        line_spacing = s.get("lineSpacing", 40)
+        line_spacing = s.get("lineSpacing", 65)
         pos_count = s.get("posCount", 10)
         neg_count = s.get("negCount", 10)
         cross_spacing = s.get("crossSpacing", 80)
-        lines, xs, ys = generate_streets_from_tensor_field(
-            s["siteWidth"], s["siteHeight"],
-            basis, centers, blend_factor=blend,
-            line_spacing=line_spacing, pos_count=pos_count, neg_count=neg_count,
-            cross_spacing=cross_spacing,
-            boundary=boundary, boundary_decay=boundary_decay, boundary_blend=boundary_blend,
-            height_gradient_fn=height_gradient_fn, height_blend=height_blend,
-        )
-        lines_by_curve = [lines] if lines else []
-        cross_spacings = [cross_spacing]
-        curve_arrays_by_curve = [(xs, ys)]
+        use_hyper = data.get("use_hyper", False)
+        two_stage = data.get("two_stage", False)
 
-        self.draw_result(lines_by_curve, cross_spacings, curve_arrays_by_curve)
+        tensor_fn = _base_tensor_fn
+        if data.get("laplacian_smooth"):
+            tensor_fn = create_smoothed_tensor_fn(
+                _base_tensor_fn, s["siteWidth"], s["siteHeight"],
+                grid_step=30, smooth_iterations=data.get("smooth_iters", 2),
+            )
 
-    def draw_result(self, lines_by_curve, cross_spacings=None, curve_arrays_by_curve=None, hyperstreamline_mode=False):
+        if use_hyper:
+            seeds = data.get("hyper_seeds") or list(centers)
+            d_sep = line_spacing
+            angle_stop = data.get("angle_stop", 0.3)
+            if two_stage:
+                hyper_graph, xs, ys = two_stage_street_generation(
+                    tensor_fn, s["siteWidth"], s["siteHeight"],
+                    seed_points=seeds, major_d_sep=d_sep, minor_d_sep=d_sep * 0.6, step_size=2.5,
+                    angle_threshold=angle_stop)
+            else:
+                hyper_graph, xs, ys = generate_streets_from_hyperstreamlines(
+                    tensor_fn, s["siteWidth"], s["siteHeight"],
+                    seed_points=seeds, d_sep=d_sep, step_size=2.5, angle_threshold=angle_stop)
+            return {"kind": "hyper_street", "hyper_street_graph": hyper_graph}
+        else:
+            lines, xs, ys = generate_streets_from_tensor_field(
+                s["siteWidth"], s["siteHeight"],
+                basis, centers, blend_factor=blend,
+                line_spacing=line_spacing, pos_count=pos_count, neg_count=neg_count,
+                cross_spacing=cross_spacing,
+                boundary=boundary, boundary_decay=boundary_decay, boundary_blend=boundary_blend,
+                height_gradient_fn=height_gradient_fn, height_blend=height_blend,
+            )
+            return {
+                "kind": "B",
+                "lines_by_curve": [lines] if lines else [],
+                "cross_spacings": [cross_spacing],
+                "curve_arrays_by_curve": [(xs, ys)],
+            }
+
+    def generate(self):
+        if self._generate_after_id:
+            self.root.after_cancel(self._generate_after_id)
+            self._generate_after_id = None
+        if "lineSpacing" not in self.controls:
+            return
+        s = self.state
+        basis = s.get("basisType", BASIS_GRID)
+        centers = s.get("tensorCenters", self.tensor_centers)
+        if not centers:
+            centers = [(s["siteWidth"] / 2, s["siteHeight"] / 2)]
+        boundary = self._get_boundary()
+        height_gradient_fn = self._get_height_gradient_fn()
+        perlin_str = safe_float(self.controls["perlinStrength"].get(), 0.2) if "perlinStrength" in self.controls else 0.2
+
+        data = {
+            "state": dict(s),
+            "centers": list(centers),
+            "boundary": boundary,
+            "height_gradient_fn": height_gradient_fn,
+            "perlin_str": perlin_str,
+            "brush_strokes": [list(st) for st in self.brush_strokes],
+            "laplacian_smooth": self.controls.get("laplacianSmooth") and self.controls["laplacianSmooth"].get(),
+            "smooth_iters": safe_int(self.controls.get("smoothIters", tk.Scale()).get(), 2) if "smoothIters" in self.controls else 2,
+            "use_hyper": "streetGenMode" in self.controls and self.controls["streetGenMode"].get() == STREET_HYPER,
+            "two_stage": "twoStage" in self.controls and self.controls["twoStage"].get(),
+            "angle_stop": safe_float(self.controls.get("hyperAngleStop", tk.Scale()).get(), 0.3) if "hyperAngleStop" in self.controls else 0.3,
+        }
+        if s.get("runMode") == "D":
+            data["hyper_seeds"] = self.hyperstreamline_seeds if self.hyperstreamline_seeds else list(centers)
+            data["step_size"] = safe_float(self.controls["hyperStepSize"].get(), 2.5) if "hyperStepSize" in self.controls else 2.5
+            max_len = safe_float(self.controls["hyperMaxLength"].get(), 0) if "hyperMaxLength" in self.controls else 0
+            data["max_length"] = max_len if max_len > 0 else None
+            hyper_type = self.controls["hyperType"].get() if "hyperType" in self.controls else HYPERSTREAMLINE_MAJOR
+            data["use_major"] = hyper_type in (HYPERSTREAMLINE_MAJOR, HYPERSTREAMLINE_BOTH)
+            data["use_minor"] = hyper_type in (HYPERSTREAMLINE_MINOR, HYPERSTREAMLINE_BOTH)
+        else:
+            data["hyper_seeds"] = self.hyperstreamline_seeds if self.hyperstreamline_seeds else list(centers)
+
+        self._show_calculating()
+        self._gen_polling = True
+        self._gen_thread = threading.Thread(target=self._run_generate_worker, args=(data,), daemon=True)
+        self._gen_thread.start()
+        self.root.after(80, self._poll_gen_queue)
+
+    def draw_result(self, lines_by_curve=None, cross_spacings=None, curve_arrays_by_curve=None,
+                    hyperstreamline_mode=False, hyper_street_graph=None, mode_a_data=None):
         s = self.state
         cross_spacings = cross_spacings or [s["crossSpacing"]]
         curve_arrays_by_curve = curve_arrays_by_curve or []
+        lines_by_curve = lines_by_curve or []
         self._export_geometry = {"polylines": [], "parcels": []}
 
         pw, ph = s["siteWidth"], s["siteHeight"]
@@ -1062,6 +1315,33 @@ class UrbanFieldGenerator:
         use_adaptive = s.get("adaptiveCross", True)
         main_color, main_w = "#e0e0e0", 2
         cross_color, cross_w = "#888888", 1
+
+        # Mode A 预计算数据（来自后台线程）
+        if mode_a_data is not None:
+            for (x, y, ux, uy, vx, vy) in mode_a_data["samples"]:
+                self._draw_cross_glyph(x, y, ux, uy, vx, vy, half_len=12, fill="#66aaff", width=2)
+            basis = mode_a_data.get("basis", BASIS_GRID)
+            centers = mode_a_data.get("centers", [])
+            if basis in (BASIS_RADIAL, BASIS_BLEND, BASIS_BOUNDARY, BASIS_BOUNDARY_BLEND):
+                for cx, cy in centers:
+                    px, py = self._pad(cx, cy)
+                    self.canvas.create_oval(px - 8, py - 8, px + 8, py + 8, fill="#ff6600", outline="#ffffff", width=2)
+            for stroke in mode_a_data.get("brush_strokes", []):
+                for i in range(len(stroke) - 1):
+                    ax, ay = self._pad(stroke[i][0], stroke[i][1])
+                    bx, by = self._pad(stroke[i + 1][0], stroke[i + 1][1])
+                    self.canvas.create_line(ax, ay, bx, by, fill="#00aa66", width=2, dash=(2, 2))
+            if self.brush_draw_mode and self._current_brush_stroke:
+                for i in range(len(self._current_brush_stroke) - 1):
+                    ax, ay = self._pad(self._current_brush_stroke[i][0], self._current_brush_stroke[i][1])
+                    bx, by = self._pad(self._current_brush_stroke[i + 1][0], self._current_brush_stroke[i + 1][1])
+                    self.canvas.create_line(ax, ay, bx, by, fill="#00ff88", width=2)
+            return
+
+        # B/C + use_hyper: 直接绘制 graph edges，不经过 offset 逻辑
+        if hyper_street_graph is not None:
+            self._draw_hyper_street_graph(hyper_street_graph)
+            return
 
         # Mode D: 超流线
         if hyperstreamline_mode:
@@ -1080,131 +1360,106 @@ class UrbanFieldGenerator:
                 self.canvas.create_oval(px - 6, py - 6, px + 6, py + 6, fill="#00ff00", outline="#ffffff", width=2)
             return
 
-        # Mode A: 张量场十字短线可视化
-        if s["runMode"] == "A":
-            # 绘制张量场十字/短线方向纹理
-            basis = s.get("basisType", BASIS_GRID)
-            centers = s.get("tensorCenters", self.tensor_centers)
-            if not centers:
-                centers = [(s["siteWidth"] / 2, s["siteHeight"] / 2)]
-            blend = s.get("basisBlendFactor", 0.5)
-            boundary = self._get_boundary()
-            boundary_decay = s.get("boundaryDecay", 150)
-            boundary_blend = s.get("boundaryBlendFactor", 0.5)
-            height_gradient_fn = self._get_height_gradient_fn()
-            height_blend = s.get("heightBlendFactor", 0.5)
-            samples = sample_tensor_field_grid(
-                s["siteWidth"], s["siteHeight"],
-                basis, centers, blend_factor=blend, grid_step=25,
-                boundary=boundary, boundary_decay=boundary_decay, boundary_blend=boundary_blend,
-                height_gradient_fn=height_gradient_fn, height_blend=height_blend,
-            )
-            for (x, y, ux, uy, vx, vy) in samples:
-                self._draw_cross_glyph(x, y, ux, uy, vx, vy, half_len=12, fill="#66aaff", width=2)
-            if basis in (BASIS_RADIAL, BASIS_BLEND, BASIS_BOUNDARY, BASIS_BOUNDARY_BLEND):
-                for cx, cy in centers:
-                    px, py = self._pad(cx, cy)
-                    self.canvas.create_oval(px - 8, py - 8, px + 8, py + 8, fill="#ff6600", outline="#ffffff", width=2)
-        else:
+        # Mode A 由 mode_a_data 分支处理，此处为 B/C
+        if s["runMode"] in ("B", "C"):
             for curve_idx, lines in enumerate(lines_by_curve):
                 if not lines:
                     continue
                 curve_color = curve_colors[curve_idx % len(curve_colors)] if len(lines_by_curve) > 1 else "#ff3300"
-                if s["runMode"] in ("B", "C"):
-                    sorted_lines = sorted(lines, key=lambda ln: abs(ln[0].get("offset", 0)))
-                    hierarchy = classify_longitudinal_hierarchy(lines) if use_hierarchy else []
-                    line_level = {idx: level for idx, level in hierarchy}
+                sorted_lines = sorted(lines, key=lambda ln: abs(ln[0].get("offset", 0)))
+                hierarchy = classify_longitudinal_hierarchy(lines) if use_hierarchy else []
+                line_level = {idx: level for idx, level in hierarchy}
 
-                    for line_idx, line in enumerate(lines):
-                        pts = [(p["x"], p["y"]) for p in line]
-                        self._export_geometry["polylines"].append(pts)
-                        if use_hierarchy and line_idx in line_level:
-                            w, fill = hierarchy_style(line_level[line_idx])
-                        else:
-                            fill, w = (cross_color, cross_w) if perp else (main_color, main_w)
-                        for i in range(len(pts) - 1):
-                            self._draw_line_segment(pts[i], pts[i + 1], fill, w)
+                for line_idx, line in enumerate(lines):
+                    pts = [(p["x"], p["y"]) for p in line]
+                    self._export_geometry["polylines"].append(pts)
+                    if use_hierarchy and line_idx in line_level:
+                        w, fill = hierarchy_style(line_level[line_idx])
+                    else:
+                        fill, w = (cross_color, cross_w) if perp else (main_color, main_w)
+                    for i in range(len(pts) - 1):
+                        self._draw_line_segment(pts[i], pts[i + 1], fill, w)
 
-                    cs = cross_spacings[curve_idx] if curve_idx < len(cross_spacings) else s["crossSpacing"]
-                    xs, ys = ([], [])
-                    if curve_idx < len(curve_arrays_by_curve):
-                        xs, ys = curve_arrays_by_curve[curve_idx]
-                    value_field = None
-                    cent = (s["siteWidth"] / 2, s["siteHeight"] / 2)
-                    if s.get("tensorCenters"):
-                        pts = s["tensorCenters"]
-                        cent = (sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts))
-                    if use_adaptive and xs and ys:
-                        t_positions = adaptive_cross_t_positions(
-                            xs, ys, sorted_lines,
-                            base_spacing=cs,
-                            curvature_weight=s.get("curvatureWeight", 0.4),
-                            attractor_weight=s.get("attractorWeight", 0.3),
-                            value_weight=s.get("valueWeight", 0.2),
-                            attractor_x=cent[0],
-                            attractor_y=cent[1],
-                            attractor_sigma=200,
-                            value_field=value_field,
-                            site_width=s["siteWidth"],
-                            site_height=s["siteHeight"],
+                cs = cross_spacings[curve_idx] if curve_idx < len(cross_spacings) else s["crossSpacing"]
+                xs, ys = ([], [])
+                if curve_idx < len(curve_arrays_by_curve):
+                    xs, ys = curve_arrays_by_curve[curve_idx]
+                value_field = None
+                cent = (s["siteWidth"] / 2, s["siteHeight"] / 2)
+                if s.get("tensorCenters"):
+                    pts = s["tensorCenters"]
+                    cent = (sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts))
+                if use_adaptive and xs and ys:
+                    t_positions = adaptive_cross_t_positions(
+                        xs, ys, sorted_lines,
+                        base_spacing=cs,
+                        curvature_weight=s.get("curvatureWeight", 0.4),
+                        attractor_weight=s.get("attractorWeight", 0.3),
+                        value_weight=s.get("valueWeight", 0.2),
+                        attractor_x=cent[0],
+                        attractor_y=cent[1],
+                        attractor_sigma=200,
+                        value_field=value_field,
+                        site_width=s["siteWidth"],
+                        site_height=s["siteHeight"],
+                    )
+                else:
+                    num_sections = max(3, min(51, int(1600 / max(cs, 10))))
+                    t_positions = [j / max(num_sections - 1, 1) for j in range(num_sections)]
+
+                for t in t_positions:
+                    idx = 0 if t <= 0 else min(int(t / T_STEP), T_COUNT - 1)
+                    cross_pts = get_line_at_t(sorted_lines, t, perp=True)
+                    if len(cross_pts) < 2:
+                        continue
+                    self._export_geometry["polylines"].append(cross_pts)
+                    fill, w = (main_color, main_w) if perp else (cross_color, cross_w)
+                    for i in range(len(cross_pts) - 1):
+                        self._draw_line_segment(cross_pts[i], cross_pts[i + 1], fill, w)
+
+                basis = s.get("basisType", BASIS_GRID)
+                if basis in (BASIS_RADIAL, BASIS_BLEND, BASIS_BOUNDARY, BASIS_BOUNDARY_BLEND):
+                    centers_draw = s.get("tensorCenters", self.tensor_centers)
+                    if not centers_draw:
+                        centers_draw = [(s["siteWidth"] / 2, s["siteHeight"] / 2)]
+                    for cx, cy in centers_draw:
+                        px, py = self._pad(cx, cy)
+                        self.canvas.create_oval(px - 8, py - 8, px + 8, py + 8, fill="#ff6600", outline="#ffffff", width=2)
+
+                if s["runMode"] == "C":
+                    use_frontage = s.get("parcelFrontageBased", True)
+                    use_block = s.get("parcelBlockByBlock", True)
+                    use_corner = s.get("parcelCornerSeparate", True)
+                    use_pert = s.get("parcelPerturbation", False)
+                    pert_str = s.get("parcelPerturbationStr", 0.02) if use_pert else 0
+                    min_f = s.get("pMin", 15)
+                    max_f = s.get("pMax", 45)
+                    min_a = s.get("pMinArea", 50)
+                    max_d = s.get("pMaxDepth", 200)
+
+                    if use_frontage and use_block:
+                        parcel_list = subdivide_blocks(
+                            sorted_lines, t_positions,
+                            min_frontage=min_f, max_frontage=max_f,
+                            min_area=min_a, max_depth=max_d,
+                            use_frontage_based=True,
+                            use_block_by_block=True,
+                            corner_parcels_separate=use_corner,
+                            perturbation_strength=pert_str,
+                            seed=hash(str(s.get("tensorCenters", [(0, 0)]))),
                         )
                     else:
-                        num_sections = max(3, min(51, int(1600 / max(cs, 10))))
-                        t_positions = [j / max(num_sections - 1, 1) for j in range(num_sections)]
+                        parcel_list = rule_based_parcels(sorted_lines, segments=15)
 
-                    for t in t_positions:
-                        idx = 0 if t <= 0 else min(int(t / T_STEP), T_COUNT - 1)
-                        cross_pts = get_line_at_t(sorted_lines, t, perp=True)
-                        if len(cross_pts) < 2:
-                            continue
-                        self._export_geometry["polylines"].append(cross_pts)
-                        fill, w = (main_color, main_w) if perp else (cross_color, cross_w)
-                        for i in range(len(cross_pts) - 1):
-                            self._draw_line_segment(cross_pts[i], cross_pts[i + 1], fill, w)
-
-                    basis = s.get("basisType", BASIS_GRID)
-                    if basis in (BASIS_RADIAL, BASIS_BLEND, BASIS_BOUNDARY, BASIS_BOUNDARY_BLEND):
-                        centers_draw = s.get("tensorCenters", self.tensor_centers)
-                        if not centers_draw:
-                            centers_draw = [(s["siteWidth"] / 2, s["siteHeight"] / 2)]
-                        for cx, cy in centers_draw:
-                            px, py = self._pad(cx, cy)
-                            self.canvas.create_oval(px - 8, py - 8, px + 8, py + 8, fill="#ff6600", outline="#ffffff", width=2)
-
-                    if s["runMode"] == "C":
-                        use_frontage = s.get("parcelFrontageBased", True)
-                        use_block = s.get("parcelBlockByBlock", True)
-                        use_corner = s.get("parcelCornerSeparate", True)
-                        use_pert = s.get("parcelPerturbation", False)
-                        pert_str = s.get("parcelPerturbationStr", 0.02) if use_pert else 0
-                        min_f = s.get("pMin", 15)
-                        max_f = s.get("pMax", 45)
-                        min_a = s.get("pMinArea", 50)
-                        max_d = s.get("pMaxDepth", 200)
-
-                        if use_frontage and use_block:
-                            parcel_list = subdivide_blocks(
-                                sorted_lines, t_positions,
-                                min_frontage=min_f, max_frontage=max_f,
-                                min_area=min_a, max_depth=max_d,
-                                use_frontage_based=True,
-                                use_block_by_block=True,
-                                corner_parcels_separate=use_corner,
-                                perturbation_strength=pert_str,
-                                seed=hash(str(s.get("tensorCenters", [(0, 0)]))),
-                            )
-                        else:
-                            parcel_list = rule_based_parcels(sorted_lines, segments=15)
-
-                        for parcel_pts in parcel_list:
-                            self._export_geometry["parcels"].append(parcel_pts)
-                            if random.random() > 0.15:
-                                gray = int(255 * (0.05 + random.random() * 0.1))
-                                fill_color = f"#{gray:02x}{gray:02x}{gray:02x}"
-                                pad_pts = [self._pad(x, y) for x, y in parcel_pts]
-                                flat = [c for p in pad_pts for c in p]
-                                self.canvas.create_polygon(
-                                    *flat, fill=fill_color, outline="#1a1a1a")
+                    for parcel_pts in parcel_list:
+                        self._export_geometry["parcels"].append(parcel_pts)
+                        if random.random() > 0.15:
+                            gray = int(255 * (0.05 + random.random() * 0.1))
+                            fill_color = f"#{gray:02x}{gray:02x}{gray:02x}"
+                            pad_pts = [self._pad(x, y) for x, y in parcel_pts]
+                            flat = [c for p in pad_pts for c in p]
+                            self.canvas.create_polygon(
+                                *flat, fill=fill_color, outline="#1a1a1a")
 
         if self.custom_seed_curves:
             colors = ["#ff6600", "#66ff00", "#0066ff", "#ff00ff", "#00ffff"]
@@ -1319,13 +1574,20 @@ class UrbanFieldGenerator:
         self.controls["btnExportDxf"].config(text=i18n.T["export_dxf"])
         self._footer_label.config(text=i18n.T["footer"])
         self._refresh_curve_list()
-        self.status_label.config(text=i18n.T["status_default"] if not self.draw_mode else "Draw river boundary")
+        status = i18n.T["status_default"]
+        if self.draw_mode:
+            status = "Draw river boundary"
+        elif self.brush_draw_mode:
+            status = "Draw brush stroke"
+        self.status_label.config(text=status)
         self.update_state()
 
     def _reset(self):
         w, h = safe_float(self.controls["siteWidth"].get(), 1200), safe_float(self.controls["siteHeight"].get(), 200)
         self.tensor_centers = [(w / 2, h / 2)]
-        self.controls["lineSpacing"].set(40)
+        self.brush_strokes = []
+        self._current_brush_stroke = []
+        self.controls["lineSpacing"].set(65)
         self.controls["posCount"].delete(0, tk.END)
         self.controls["posCount"].insert(0, "10")
         self.controls["negCount"].delete(0, tk.END)

@@ -32,6 +32,13 @@
 - **道路等级**：primary / secondary / local，主骨架更明显
 - **自适应横街**：根据曲率、吸引子距离、地价价值决定横街密度，不再固定 t 采样
 
+- **论文式选项**（Paper-Style Options，参考 Chen et al. SIGGRAPH 2008）
+  - **街道生成**：Parametric（参数化偏移）或 Hyperstreamline（超流线交替追踪）
+  - **二阶段**：主路 → 分区 → 次路
+  - **Perlin 旋转**：松弛正交性，产生有机街道模式
+  - **Laplacian 平滑**：对张量场做网格平滑
+  - **笔刷编辑**：绘制曲线设定局部张量方向
+
 ## 环境要求
 
 - Python 3.x
@@ -56,9 +63,10 @@ python main.py
 4. **Boundary** 基底：勾选 Use River Boundary，可手绘河流或加载 GIF 遮罩图。
 5. **Height** 基底：勾选 Use Height Map，加载 PNG/JPG 高程图（需 `pip install Pillow`）。
 6. **Radial / Blend**：可点击 Add Center 在画布上添加多个张量中心，拖拽调整位置。
-7. 调整参数后，结果会实时更新。点击 **Generate** 重新生成，**Reset** 恢复默认。
-8. 在 Mode B 或 C 下可进一步设置街道与地块相关参数。
-9. **导出到 Rhino**：**Export .py (RhinoScript)** 保存脚本，在 Rhino 的 EditPythonScript 中运行；**Export DXF** 导出 DXF（需 `pip install ezdxf`）。导出时以场地矩形为边界自动裁剪。
+7. **论文式选项**：Street Gen 选 Hyperstreamline 可启用超流线街道生成；勾选 Two-Stage 启用主路→次路二阶段；Perlin Strength 调节旋转噪声；Laplacian Smooth 平滑张量场；Draw Brush 绘制笔刷曲线设定局部方向。
+8. 调整参数后，结果会实时更新。点击 **Generate** 重新生成，**Reset** 恢复默认。
+9. 在 Mode B 或 C 下可进一步设置街道与地块相关参数。
+10. **导出到 Rhino**：**Export .py (RhinoScript)** 保存脚本，在 Rhino 的 EditPythonScript 中运行；**Export DXF** 导出 DXF（需 `pip install ezdxf`）。导出时以场地矩形为边界自动裁剪。
 
 ## 项目结构
 
@@ -66,25 +74,21 @@ python main.py
 tensor-field/
 ├── main.py              # 程序入口
 ├── app.py               # 主应用类 UrbanFieldGenerator（UI + 逻辑编排）
+├── app_single_file.py   # 单文件构建（由 build_single_file.py 生成）
+├── build_single_file.py # 构建脚本
 ├── tensor_field.py      # 张量场模块（7 种基底，街道生成）
 ├── i18n.py              # 中英文双语界面
 ├── parcel_subdivision.py # 地块划分（frontage-based、block-by-block、转角、扰动）
 ├── config.py            # 配置常量（T_STEP, T_COUNT）
-├── utils.py             # 工具函数（lerp, noise, safe_float, safe_int）
+├── utils.py             # 工具函数（lerp, noise, perlin_noise, safe_float, safe_int）
 ├── geom.py              # 几何裁剪（线段/折线/多边形裁剪到矩形）
 ├── curve.py             # 曲线插值（Catmull-Rom 样条、弧长采样）
-├── field_generator.py   # 向量场生成逻辑（预计算、扩张线生成）
 ├── street_network.py    # 街道网络（道路等级、自适应横街）
 ├── boundary_field.py    # 边界场（曲线/遮罩图→边界方向）
 ├── height_field.py      # 高程场（灰度高程图→梯度→张量基底）
 ├── hyperstreamline.py   # 超流线（主/副追踪、种子点、停止条件）
-├── engines/             # 向量场引擎模块
-│   ├── offset_field_engine.py   # A. OffsetFieldEngine（7 种 Seed Curve 模式）
-│   ├── blended_field_engine.py  # B. BlendedFieldEngine（多母线叠加、距离衰减、切向/法向混合）
-│   ├── scalar_field_engine.py   # C. ScalarFieldEngine（标量场→梯度场→垂直流线）
-│   └── streamline_integrator.py # D. StreamlineIntegrator（Euler/RK4 流线积分）
+├── street_from_hyperstreamlines.py  # 论文式街道生成（交替追踪、交点图、二阶段）
 ├── exporter.py          # 导出逻辑（RhinoScript、DXF）
-├── urban_field_gen.py   # 旧版单文件（保留作参考）
 ├── requirements.txt     # 可选依赖（ezdxf: DXF 导出，Pillow: 高程图 PNG/JPG）
 └── README.md
 ```
@@ -95,6 +99,7 @@ tensor-field/
 - **Boundary Field**：`boundary_field.py` 从手绘曲线或遮罩图像提取边界方向，用于 Boundary 基底。
 - **Height Field**：`height_field.py` 从灰度高程图计算梯度，转为张量方向，用于 Height 基底。
 - **Hyperstreamline**：`hyperstreamline.py` 从张量场追踪主(u)/副(v)超流线，RK4 积分，停止条件：边界、最大长度、角度突变。
+- **Street from Hyperstreamlines**：`street_from_hyperstreamlines.py` 实现论文式街道生成：主/副超流线交替追踪、交点构建图、二阶段主路→次路。
 
 ## 技术说明
 
@@ -104,7 +109,7 @@ tensor-field/
 
 ## 版本
 
-V.1.2 — 七种张量基底（含 Boundary / Height）、超流线、多中心 Radial
+V.1.3 — 论文式：超流线街道、交替追踪、二阶段、Perlin 旋转、Laplacian 平滑、笔刷编辑
 
 ## 许可证
 

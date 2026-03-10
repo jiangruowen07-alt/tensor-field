@@ -54,7 +54,7 @@ def integrate_hyperstreamline(
     max_steps=500,
     max_length=None,
     bounds=None,
-    angle_threshold=0.5,
+    angle_threshold=0.3,
 ):
     """
     从 (x0, y0) 追踪一条超流线。
@@ -67,7 +67,7 @@ def integrate_hyperstreamline(
         max_steps: 单方向最大步数
         max_length: 单方向最大长度，None 表示不限制
         bounds: (xmin, ymin, xmax, ymax)，超出则停止
-        angle_threshold: 方向突变阈值，dot < angle_threshold 时停止（cos(60°)=0.5）
+        angle_threshold: 方向突变阈值，dot < angle_threshold 时停止（0.3≈72°，更宽松以延长流线）
 
     Returns:
         list of {"x", "y", "t"} 按积分顺序
